@@ -1,53 +1,52 @@
-# Relatório Científico Final — LinConEs Nativo
+# Relatório Final de Engenharia — LinConEs Nativo + Correções Estruturais no CGD
 
-## 1. Resumo Executivo
+## 1. Visão Geral
 
-Foi projetada, implementada, compilada nativamente e validada uma implementação completa da **Linguagem de Consulta Estruturada (LinConEs)** em **Delégua**, utilizando exclusivamente o compilador **CGD v0.10.0** (`~/cgd/cgd`), o sistema oficial de projetos (`projeto.json`) e o coletor híbrido **CGD-GC** por padrão (sem `libgc`).
+O **LinConEs Nativo** (`~/lincones`) é uma implementação completa da Linguagem de Consulta Estruturada (LinConEs) em **português brasileiro**, escrita integralmente em **Delégua**, gerenciada pelo sistema oficial de projetos do CGD (`projeto.json`) e compilada nativamente para C99 pelo **CGD** com seu coletor híbrido padrão (**CGD-GC**, zero `libgc`).
 
-O projeto entrega:
-1. **Motor Universal de Tradução e Execução SQL** sobre um frontend único para **SQLite**, **PostgreSQL** e **MySQL**.
-2. **SGBD Relacional Embarcado Próprio (`.lce`)**, escrito 100% em Delégua, sem SQLite ou qualquer outro SGBD por baixo, com armazenamento paginado de 4096 bytes, checksums CRC32, Buffer Pool CLOCK, Slotted Pages, Árvores B+ persistentes, catálogo persistente, transações ACID, WAL físico com recuperação idempotente, savepoints, otimizador baseado em custo, executor físico completo, API pública consumível por outros projetos CGD, CLI e REPL interativo.
+O projeto entrega dois produtos integrados e validados:
+1. **Motor universal de análise, tradução e execução LinConEs** para **SQLite**, **PostgreSQL** e **MySQL/MariaDB**.
+2. **SGBD relacional embarcado próprio (`MotorProprio`)** inspirado arquiteturalmente no SQLite: páginas de 4 KiB com CRC32, `SlottedPage`, **Páginas de Overflow** (`tipo = 7`, testadas até 1 MiB), Buffer Pool CLOCK, Árvore B+ persistente, Catálogo do Sistema, WAL com `PONTO DE SALVAMENTO` e recuperação após falha, **Ordenação Externa** em disco com orçamento configurável, Otimizador lógico/físico e Executor relacional com **CTEs**, **Subconsultas Correlacionadas** e **Funções de Janela**.
 
-## 2. Versão do CGD e Referências Oficiais Estudadas
+---
 
-- **Compilador:** `CGD v0.10.0` (`~/cgd/cgd`, commit base `ef68db3`, `--gc=cgd`).
-- **Referências normativas (licença MIT, Design Líquido):**
-  - `DesignLiquido/LinConEs` (`7dc995833cd28f2f668a02d672b81ca18702a2c1`)
-  - `DesignLiquido/lincones-sqlite` (`1f52c8aff951e9c61cb3a34156e87ed6d6c2ab02`)
-  - `DesignLiquido/lincones-mysql` (`c89f01f470ec19fe9d2ecb47de828c5420266dae`)
-  - `DesignLiquido/lincones-postgresql` (`5023d09d4cf7c2faeae327d76e5f9a2f787986d9`)
+## 2. Correções Estruturais Realizadas no CGD (`~/cgd`)
 
-## 3. Validação Executada (Evidências Reais)
+1. **Correção definitiva do `CGD-GC` para strings heap de 1 byte** (relatório detalhado em `~/cgd/docs/relatorio-correcao-gc-strings-1byte-e-ffi.md`):
+   - Eliminada a guarda incorreta `text.len >= 2U` em 6 pontos do runtime (`delegua_rt.h`, `gc_collector.c` ×2, `gc_verifier.c`, `colecoes.c`, `objetos.c`).
+   - Fortalecido `HeapVerifier` (`gc_allocator.c`) para verificar invariantes após coletas **minor** e **major** sob `CGD_GC_PROFILE=verify`.
+   - Adicionado teste permanente de regressão em `~/cgd/testes/gc_hibrido.py`.
+2. **Evolução do FFI C (`cponteiro`, `<stdio.h>` e soname versionado)**:
+   - Adicionado tipo opaco `cponteiro` (`void *`) no registro de tipos, análise semântica e codegen C.
+   - Suporte a `@definicao(declarado = verdadeiro)` e detecção automática de símbolos da libc (`<stdio.h>`, `<stdlib.h>`, `<string.h>`), eliminando conflitos de cabeçalho.
+   - Suporte a bibliotecas por soname versionado (`:libmariadb.so.3`) e caminhos absolutos no driver de compilação.
+   - Adicionado teste permanente `~/cgd/testes/ffi_stdio_e_soname.py` (GCC e Clang `-o`).
 
-| Categoria | Arquivo / Comando | Resultado |
-| :--- | :--- | :--- |
-| Fundação (Diagnósticos, CRC32, Tipos, Lógica Ternária) | `testes/fundacao_teste.delegua` | **APROVADO** |
-| Frontend (Lexador, Parser, AST, Semântica, Modo Estrito/Estendido) | `testes/frontend_teste.delegua` | **APROVADO** |
-| Motor Universal (SQLite, PostgreSQL, MySQL + Conector SQLite ao vivo) | `testes/traducao_e_conectores_teste.delegua` | **APROVADO** |
-| Armazenamento Físico (`.lce` 4 KiB, Buffer Pool 4 pags, Slotted Pages) | `testes/armazenamento_teste.delegua` | **APROVADO** |
-| Índices B+ Tree Persistentes (splits, intervalos, integridade) + Catálogo | `testes/indices_e_catalogo_teste.delegua` | **APROVADO** |
-| Transações ACID, WAL, Savepoints, Crash-Recovery Idempotente e Locks | `testes/transacoes_wal_teste.delegua` | **APROVADO** |
-| Motor Próprio Completo + Diferencial vs SQLite + Otimizador ON/OFF | `testes/motor_proprio_teste.delegua` | **APROVADO** |
-| Fuzzing (Parser + Corrupção CRC32) + Propriedades Aleatórias | `testes/fuzzing_e_propriedades_teste.delegua` | **APROVADO** |
-| API Pública (`api.lincones`) | `testes/principal_teste.delegua` | **APROVADO** |
-| Consumo por Segundo Projeto CGD Independente | `/tmp/app_consumidor_lincones` (`cgd rodar`) | **APROVADO** |
-| CLI Produção (`--modo producao`, `ldd` sem `libgc`) | `compilacao/lincones` | **APROVADO** |
-| UndefinedBehaviorSanitizer (`-fsanitize=undefined`) | `fundacao_teste` com UBSan | **APROVADO (0 UB)** |
-| Benchmark 1.000 registros (Próprio vs SQLite) | `desempenho/benchmark_lincones_vs_sqlite.delegua` | **23.4 ms (200 PK B+Tree) vs 12.1 ms SQLite (1.93x)** |
+---
 
-## 4. Telemetria do CGD-GC e Otimizações Aplicadas
+## 3. Evolução e Validação Completa do LinConEs (`~/lincones`)
 
-No binário de produção `compilacao/lincones` (dados em `documentacao/relatorio_memoria_cgd.json`):
-- **30 funções ANS** especializadas automaticamente (`atualizarByteCrc32`, `potenciaDez`, `triE/triOu/triNao`, constantes de formato/WAL).
-- **53 chamadas unboxed (ANS)**, **2 objetos promovidos para stack local** (`AnalisadorSintatico`, `LeitorJSON`), **9 coleções com liberação determinística**, **403 chamadas desvirtualizadas**.
-- **Otimização orientada por evidências:** eliminar a regravação redundante de catálogo durante transações explícitas reduziu `heapBytes` no benchmark de **59.38 MiB para 33.75 MiB (-43%)** e melhorou a busca por PK de **25.82 ms para 23.40 ms**.
+### 3.1 Suíte de Testes do LinConEs (11/11 aprovados com `CGD_GC_PROFILE=verify`)
+1. `testes/armazenamento_teste.delegua` — Páginas 4 KiB, CRC32, Buffer Pool CLOCK, Slotted Page, B+ Tree, Catálogo.
+2. `testes/fundacao_teste.delegua` — Tipos de dados, diagnósticos, valores relacionais.
+3. `testes/fuzzing_e_propriedades_teste.delegua` — Intensidade integral restaurada (400 fuzz + 150 ops com oráculo).
+4. `testes/lexador_e_parser_teste.delegua` — Lexador, parser, modo estrito vs estendido, recuperação de erros.
+5. `testes/motor_proprio_teste.delegua` — DDL, DML, índices B+ Tree, junções, agregações, transações, WAL, crash recovery.
+6. `testes/otimizador_e_api_teste.delegua` — Otimizador, `EXPLICAR`, API pública `Sessao`, segurança e limites.
+7. `testes/overflow_e_ordenacao_externa_teste.delegua` — Páginas de overflow (4001 B, 8 KiB, 64 KiB, **1 MiB**, rollback, update, delete) + ordenação externa em disco (orçamento 2 KiB, 120 linhas).
+8. `testes/principal_teste.delegua` — CLI, opções e integração principal.
+9. `testes/relacional_avancado_teste.delegua` — CTEs (`COM ... COMO`), subconsultas correlacionadas (`EXISTE`, `NAO EXISTE`, `EM`, escalar) e funções de janela (`NUMERO_LINHA`, `CLASSIFICACAO`, `CLASSIFICACAO_DENSA`, `ANTERIOR`, `PROXIMO`, `SOMA SOBRE`), com comparação diferencial linha a linha contra SQLite.
+10. `testes/semantico_teste.delegua` — Validação semântica de tipos, tabelas, colunas e CTEs.
+11. `testes/traducao_e_conectores_teste.delegua` — Tradução SQLite/PostgreSQL/MySQL + execução real contra SQLite.
 
-## 5. Instruções de Reprodução
+### 3.2 Validação ao Vivo dos Conectores Externos (Todos com `CGD_GC_PROFILE=verify`)
+- **SQLite (`3.51.2`)**: validado ao vivo via `cgd:dados/sqlite` em `traducao_e_conectores_teste` e `relacional_avancado_teste`.
+- **MariaDB (`11.8.8-MariaDB`)**: validado ao vivo via `ferramentas/validar_mariadb_vivo.delegua` compilado com `--recurso mysql` (linkado a `:libmariadb.so.3`) contra instância isolada efêmera (`mariadbd` em `/tmp`): DDL, DML, `START TRANSACTION`/`ROLLBACK`, CTE + `ROW_NUMBER() OVER`, erro SQL controlado.
+- **PostgreSQL (`17`)**: validado ao vivo via `ferramentas/validar_postgresql_libpq.delegua` compilado com `--recurso postgresql` (linkado a `libpq 180000`) contra instância isolada efêmera em container `podman`: DDL (`GENERATED BY DEFAULT AS IDENTITY`), DML, `BEGIN`/`ROLLBACK`, leitura de células via `PQgetvalue`, CTE + `ROW_NUMBER() OVER`, erro SQL controlado.
 
-```bash
-cd ~/lincones
-~/cgd/cgd testar
-~/cgd/cgd compilar --modo producao
-./compilacao/lincones executar /tmp/demo.lce exemplos/basico.lincones
-~/cgd/cgd desempenho/benchmark_lincones_vs_sqlite.delegua --gc=cgd -o -s compilacao/benchmark && ./compilacao/benchmark
-```
+### 3.3 Regressão Cruzada, Fuzzing 10× e Sanitizers
+- **CGD**: `dub test --compiler=ldc2` (10 módulos), `testes/gc_hibrido.py`, `testes/memoria.py` (9/9), `testes/ffi_stdio_e_soname.py`.
+- **DCC (`~/dcc`)**: `./bootstrap/verify.sh` **86/86** verificações aprovadas (sem modificações no DCC).
+- **Fuzzing 10×**: `ferramentas/fuzz_intensivo_10x.delegua` (12.000 parses + 4.500 ops em 3 sementes) aprovado em `balanced`, `low_mem`, `verify` e `Boehm`.
+- **ASan + UBSan**: zero erros em `reproducoes/cgd_gc_fuzz_pressao.delegua` e `testes/overflow_e_ordenacao_externa_teste.delegua`.
+- **Binário final**: `compilacao/lincones` compilado com `--modo producao`, verificado com `ldd` sem `libgc`, `libsqlite3`, `libpq` ou `libmariadb`.

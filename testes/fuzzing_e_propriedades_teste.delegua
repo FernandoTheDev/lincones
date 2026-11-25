@@ -38,7 +38,7 @@ const fragmentos: texto[] = [
     "(", ")", ",", ";", "=", ">=", "<=", "!=", "*", "?", ":p", "\"abc\"", "'x''y'",
     "123", "45.67", "@", "!", "/* aberto", "-- comentario\n", "çãõé"
 ]
-para (var f: inteiro = 0; f < 120; f = f + 1) {
+para (var f: inteiro = 0; f < 400; f = f + 1) {
     var qtdToks: inteiro = rng.entre(1, 14)
     var entrada: texto = ""
     para (var k: inteiro = 0; k < qtdToks; k = k + 1) {
@@ -55,7 +55,7 @@ db.abrir()
 db.executar("CRIAR TABELA prop (k INTEIRO CHAVE PRIMARIA, v INTEIRO NAO NULO);")
 var mapaRef: dicionario = {}
 
-para (var op: inteiro = 0; op < 50; op = op + 1) {
+para (var op: inteiro = 0; op < 150; op = op + 1) {
     var chave: inteiro = rng.entre(1, 60)
     var acao: inteiro = rng.entre(0, 2)
     var chaveTxt: texto = texto(chave)

@@ -18,6 +18,7 @@ importar diagnosticos.diagnostico como Diag
 importar tipos.valor como Val
 importar expressoes.avaliador como Eval
 importar otimizacao.otimizador como Opt
+importar execucao.ordenacao_externa como ExtSort
 
 classe ResultadoProprio {
     colunas: texto[]
@@ -127,8 +128,14 @@ classe MotorProprio {
     locks: Locks.ControleLocks
     catalogo: Cat.Catalogo
     otimizador: Opt.Otimizador
+    orcamentoOrdenacaoBytes: inteiro
+    ordenacoesExternasExecutadas: inteiro
     aberto: logico
     modoEstrito: logico
+
+    // Estado transitório de CTEs materializadas e escopo pai para subconsultas correlacionadas
+    tabelasCteAtivas: dicionario
+    escopoPaiAtivo: qualquer
 
     // Métricas de observabilidade
     consultasExecutadas: inteiro
@@ -149,8 +156,12 @@ classe MotorProprio {
         isto.locks = Locks.ControleLocks()
         isto.catalogo = Cat.Catalogo()
         isto.otimizador = Opt.Otimizador(verdadeiro, verdadeiro)
+        isto.orcamentoOrdenacaoBytes = 4194304 // 4 MiB padrão; configurável
+        isto.ordenacoesExternasExecutadas = 0
         isto.aberto = falso
         isto.modoEstrito = modoEstrito
+        isto.tabelasCteAtivas = {}
+        isto.escopoPaiAtivo = nulo
         isto.consultasExecutadas = 0
         isto.linhasProcessadas = 0
         isto.linhasRetornadas = 0
@@ -639,11 +650,192 @@ classe MotorProprio {
         retorna res
     }
 
+    // Callback invocado pelo avaliador de expressões para subconsultas correlacionadas.
+    executarSubconsulta(cmdSub: Ast.Comando, ctxPai: Eval.ContextoLinha): ResultadoProprio {
+        var escopoAnt: qualquer = isto.escopoPaiAtivo
+        isto.escopoPaiAtivo = ctxPai
+        var resSub: ResultadoProprio = isto.execSelecionar(cmdSub, ctxPai.parametrosPosicionais, ctxPai.parametrosNomeados)
+        isto.escopoPaiAtivo = escopoAnt
+        retorna resSub
+    }
+
+    calcularJanela(
+        exprJan: Ast.Expressao,
+        linhasIn: qualquer[],
+        nomesCols: texto[],
+        tabsCols: texto[],
+        paramsPos: Val.Valor[],
+        paramsNom: dicionario
+    ): Val.Valor[] {
+        var n: inteiro = linhasIn.tamanho()
+        var resultados: Val.Valor[] = []
+        para (var z: inteiro = 0; z < n; z = z + 1) { resultados.adicionar(Val.Valor.nuloVal()) }
+        se (n == 0) { retorna resultados }
+
+        var jan: Ast.EspecificacaoJanela = exprJan.janela
+        // Agrupa índices das linhas por chave de partição
+        var chavesPart: texto[] = []
+        var particoes: qualquer[] = [] // inteiro[][]
+        para (var i: inteiro = 0; i < n; i = i + 1) {
+            var chaveP: texto = "__TODAS__"
+            se (jan.particionarPor.tamanho() > 0) {
+                chaveP = ""
+                var ctxP = Eval.ContextoLinha(nomesCols, tabsCols, linhasIn[i], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
+                para (var p: inteiro = 0; p < jan.particionarPor.tamanho(); p = p + 1) {
+                    se (p > 0) { chaveP = chaveP + "\t|\t" }
+                    chaveP = chaveP + Eval.avaliarExpressao(jan.particionarPor[p], ctxP).paraTexto()
+                }
+            }
+            var idxPart: inteiro = -1
+            para (var k: inteiro = 0; k < chavesPart.tamanho(); k = k + 1) {
+                se (chavesPart[k] == chaveP) { idxPart = k; sustar }
+            }
+            se (idxPart < 0) {
+                chavesPart.adicionar(chaveP)
+                particoes.adicionar([i])
+            } senao {
+                particoes[idxPart].adicionar(i)
+            }
+        }
+
+        var fn: texto = exprJan.nome.maiusculo()
+        // Para cada partição, ordena conforme jan.ordenarPor e calcula a função de janela
+        para (var pi: inteiro = 0; pi < particoes.tamanho(); pi = pi + 1) {
+            var idxs: inteiro[] = particoes[pi]
+            var chavesOrdPart: qualquer[] = []
+            var descPart: logico[] = []
+            se (jan.ordenarPor.tamanho() > 0) {
+                para (var od: inteiro = 0; od < jan.ordenarPor.tamanho(); od = od + 1) {
+                    descPart.adicionar(jan.ordenarPor[od].descendente)
+                }
+                var linhasPart: qualquer[] = []
+                para (var a: inteiro = 0; a < idxs.tamanho(); a = a + 1) {
+                    var idxOrig: inteiro = idxs[a]
+                    var ctxO = Eval.ContextoLinha(nomesCols, tabsCols, linhasIn[idxOrig], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
+                    var chL: Val.Valor[] = []
+                    para (var oc: inteiro = 0; oc < jan.ordenarPor.tamanho(); oc = oc + 1) {
+                        chL.adicionar(Eval.avaliarExpressao(jan.ordenarPor[oc].expressao, ctxO))
+                    }
+                    chavesOrdPart.adicionar(chL)
+                    linhasPart.adicionar([Val.Valor.deInteiro(idxOrig)])
+                }
+                var ordExt = ExtSort.OrdenadorExterno(isto.orcamentoOrdenacaoBytes)
+                var ordLinhas: qualquer[] = ordExt.ordenar(linhasPart, chavesOrdPart, descPart)
+                var novosIdxs: inteiro[] = []
+                para (var b: inteiro = 0; b < ordLinhas.tamanho(); b = b + 1) {
+                    novosIdxs.adicionar(ordLinhas[b][0].inteiroVal)
+                }
+                idxs = novosIdxs
+                // Recalcula chaves ordenadas na ordem final para detecção de empates (CLASSIFICACAO / CLASSIFICACAO_DENSA)
+                chavesOrdPart = []
+                para (var c: inteiro = 0; c < idxs.tamanho(); c = c + 1) {
+                    var ctxO2 = Eval.ContextoLinha(nomesCols, tabsCols, linhasIn[idxs[c]], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
+                    var chL2: Val.Valor[] = []
+                    para (var oc2: inteiro = 0; oc2 < jan.ordenarPor.tamanho(); oc2 = oc2 + 1) {
+                        chL2.adicionar(Eval.avaliarExpressao(jan.ordenarPor[oc2].expressao, ctxO2))
+                    }
+                    chavesOrdPart.adicionar(chL2)
+                }
+            }
+
+            var tamPart: inteiro = idxs.tamanho()
+            // Pré-cálculo para agregações de partição inteira (quando sem ORDER BY)
+            var somaPart: real = 0.0
+            var qtdPart: inteiro = 0
+            se (fn == "SOMA" ou fn == "MEDIA" ou fn == "MÉDIA") {
+                para (var sIdx: inteiro = 0; sIdx < tamPart; sIdx = sIdx + 1) {
+                    var ctxS = Eval.ContextoLinha(nomesCols, tabsCols, linhasIn[idxs[sIdx]], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
+                    var vs: Val.Valor = Eval.avaliarExpressao(exprJan.argumentos[0], ctxS)
+                    se (!vs.ehNulo()) {
+                        somaPart = somaPart + vs.comoReal()
+                        qtdPart = qtdPart + 1
+                    }
+                }
+            }
+
+            var rankAtual: inteiro = 1
+            var denseRankAtual: inteiro = 1
+            var somaAcum: real = 0.0
+            para (var posP: inteiro = 0; posP < tamPart; posP = posP + 1) {
+                var origI: inteiro = idxs[posP]
+                se (posP > 0 e chavesOrdPart.tamanho() == tamPart) {
+                    var empate: logico = compararChavesOrdem(chavesOrdPart[posP - 1], chavesOrdPart[posP], descPart) == 0
+                    se (!empate) {
+                        rankAtual = posP + 1
+                        denseRankAtual = denseRankAtual + 1
+                    }
+                }
+                se (fn == "NUMERO_LINHA") {
+                    resultados[origI] = Val.Valor.deInteiro(posP + 1)
+                } senao se (fn == "CLASSIFICACAO" ou fn == "CLASSIFICAÇÃO") {
+                    resultados[origI] = Val.Valor.deInteiro(rankAtual)
+                } senao se (fn == "CLASSIFICACAO_DENSA" ou fn == "CLASSIFICAÇÃO_DENSA") {
+                    resultados[origI] = Val.Valor.deInteiro(denseRankAtual)
+                } senao se (fn == "ANTERIOR") {
+                    var passoA: inteiro = 1
+                    se (exprJan.argumentos.tamanho() >= 2) {
+                        var ctxPa = Eval.ContextoLinha(nomesCols, tabsCols, linhasIn[origI], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
+                        passoA = Eval.avaliarExpressao(exprJan.argumentos[1], ctxPa).inteiroVal
+                    }
+                    se (posP - passoA >= 0) {
+                        var ctxAnt = Eval.ContextoLinha(nomesCols, tabsCols, linhasIn[idxs[posP - passoA]], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
+                        resultados[origI] = Eval.avaliarExpressao(exprJan.argumentos[0], ctxAnt)
+                    } senao {
+                        resultados[origI] = Val.Valor.nuloVal()
+                    }
+                } senao se (fn == "PROXIMO" ou fn == "PRÓXIMO") {
+                    var passoP: inteiro = 1
+                    se (exprJan.argumentos.tamanho() >= 2) {
+                        var ctxPp = Eval.ContextoLinha(nomesCols, tabsCols, linhasIn[origI], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
+                        passoP = Eval.avaliarExpressao(exprJan.argumentos[1], ctxPp).inteiroVal
+                    }
+                    se (posP + passoP < tamPart) {
+                        var ctxPrx = Eval.ContextoLinha(nomesCols, tabsCols, linhasIn[idxs[posP + passoP]], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
+                        resultados[origI] = Eval.avaliarExpressao(exprJan.argumentos[0], ctxPrx)
+                    } senao {
+                        resultados[origI] = Val.Valor.nuloVal()
+                    }
+                } senao se (fn == "CONTAR") {
+                    resultados[origI] = Val.Valor.deInteiro(jan.ordenarPor.tamanho() > 0 ? (posP + 1) : tamPart)
+                } senao se (fn == "SOMA") {
+                    se (jan.ordenarPor.tamanho() > 0) {
+                        var ctxAc = Eval.ContextoLinha(nomesCols, tabsCols, linhasIn[origI], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
+                        var vAc: Val.Valor = Eval.avaliarExpressao(exprJan.argumentos[0], ctxAc)
+                        se (!vAc.ehNulo()) { somaAcum = somaAcum + vAc.comoReal() }
+                        resultados[origI] = Val.Valor.deReal(somaAcum)
+                    } senao {
+                        resultados[origI] = qtdPart > 0 ? Val.Valor.deReal(somaPart) : Val.Valor.nuloVal()
+                    }
+                } senao se (fn == "MEDIA" ou fn == "MÉDIA") {
+                    resultados[origI] = qtdPart > 0 ? Val.Valor.deReal(somaPart / real(qtdPart)) : Val.Valor.nuloVal()
+                }
+            }
+        }
+        retorna resultados
+    }
+
     execSelecionar(cmd: Ast.Comando, paramsPos: Val.Valor[], paramsNom: dicionario): ResultadoProprio {
         var res = ResultadoProprio()
-        // SELECIONAR sem tabela (ex: SELECIONAR 1 + 2)
+
+        // 0. Materialização de CTEs (COM nome COMO (...)) em ordem
+        var ctesAnteriores: dicionario = isto.tabelasCteAtivas
+        se (cmd.ctes.tamanho() > 0) {
+            var novoMapaCte: dicionario = {}
+            var chAnt: texto[] = ctesAnteriores.chaves()
+            para (var ca: inteiro = 0; ca < chAnt.tamanho(); ca = ca + 1) {
+                novoMapaCte[chAnt[ca]] = ctesAnteriores[chAnt[ca]]
+            }
+            isto.tabelasCteAtivas = novoMapaCte
+            para (var ci: inteiro = 0; ci < cmd.ctes.tamanho(); ci = ci + 1) {
+                var cte: Ast.DefinicaoCte = cmd.ctes[ci]
+                var resCte: ResultadoProprio = isto.execSelecionar(cte.consulta, paramsPos, paramsNom)
+                isto.tabelasCteAtivas[cte.nome.minusculo()] = resCte
+            }
+        }
+
+        // SELECIONAR sem tabela (ex: SELECIONAR 1 + 2 ou subconsulta escalar)
         se (cmd.tabela == "") {
-            var ctxS = Eval.ContextoLinha([], [], [], paramsPos, paramsNom)
+            var ctxS = Eval.ContextoLinha([], [], [], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
             var linhaS: Val.Valor[] = []
             para (var si: inteiro = 0; si < cmd.itensSelecao.tamanho(); si = si + 1) {
                 var it: Ast.ItemSelecao = cmd.itensSelecao[si]
@@ -651,41 +843,56 @@ classe MotorProprio {
                 linhaS.adicionar(Eval.avaliarExpressao(it.expressao, ctxS))
             }
             res.linhas.adicionar(linhaS)
+            isto.tabelasCteAtivas = ctesAnteriores
             retorna res
         }
 
-        var tabBase: Cat.DefinicaoTabela = isto.catalogo.obterTabela(cmd.tabela)
-        var plano: Opt.PlanoConsulta = isto.otimizador.planejarSelecao(cmd, tabBase)
-        res.planoTexto = plano.descrever()
-
-        var apelidoBase: texto = cmd.apelidoTabela != "" ? cmd.apelidoTabela : tabBase.nome
+        var apelidoBase: texto = cmd.apelidoTabela != "" ? cmd.apelidoTabela : cmd.tabela
         var nomesCols: texto[] = []
         var tabsCols: texto[] = []
-        para (var c: inteiro = 0; c < tabBase.colunas.tamanho(); c = c + 1) {
-            nomesCols.adicionar(tabBase.colunas[c].nome)
-            tabsCols.adicionar(apelidoBase)
-        }
-
-        // 1. Leitura física (via Índice B+ Tree ou Varredura Sequencial)
         var linhasCorrentes: qualquer[] = [] // Val.Valor[][]
-        se (plano.estrategia == Opt.EstrategiaAcesso.BuscaIndiceExata) {
-            var arvEx = BTree.ArvoreBMais(isto.pager, plano.paginaRaizIndice, falso)
-            var ridsEx: Reg.IdRegistro[] = arvEx.buscarExato(plano.chaveExata)
-            para (var ri: inteiro = 0; ri < ridsEx.tamanho(); ri = ri + 1) {
-                var recEx: qualquer = isto.armazenamento.lerRegistro(ridsEx[ri])
-                se (recEx != nulo) { linhasCorrentes.adicionar(recEx) }
+        var condFinal: qualquer = cmd.condicaoOnde
+
+        // 1. Leitura física: CTE materializada OU tabela do catálogo (via Índice B+ Tree ou Varredura Sequencial)
+        var nomeBaseNorm: texto = cmd.tabela.minusculo()
+        se (isto.tabelasCteAtivas.contem(nomeBaseNorm)) {
+            var cteRes: ResultadoProprio = isto.tabelasCteAtivas[nomeBaseNorm]
+            para (var cc: inteiro = 0; cc < cteRes.colunas.tamanho(); cc = cc + 1) {
+                nomesCols.adicionar(cteRes.colunas[cc])
+                tabsCols.adicionar(apelidoBase)
             }
-        } senao se (plano.estrategia == Opt.EstrategiaAcesso.VarreduraIndiceIntervalo) {
-            var arvInt = BTree.ArvoreBMais(isto.pager, plano.paginaRaizIndice, falso)
-            var ridsInt: Reg.IdRegistro[] = arvInt.buscarIntervalo(plano.chaveMin, plano.incluirMin, plano.chaveMax, plano.incluirMax)
-            para (var rj: inteiro = 0; rj < ridsInt.tamanho(); rj = rj + 1) {
-                var recInt: qualquer = isto.armazenamento.lerRegistro(ridsInt[rj])
-                se (recInt != nulo) { linhasCorrentes.adicionar(recInt) }
-            }
+            linhasCorrentes = cteRes.linhas
+            res.planoTexto = "Plano[cte=${cmd.tabela}, linhas=${linhasCorrentes.tamanho()}]"
         } senao {
-            var recsSeq: Reg.RegistroLido[] = isto.armazenamento.varrerTabela(tabBase.paginaRaizDados)
-            para (var rk: inteiro = 0; rk < recsSeq.tamanho(); rk = rk + 1) {
-                linhasCorrentes.adicionar(recsSeq[rk].valores)
+            var tabBase: Cat.DefinicaoTabela = isto.catalogo.obterTabela(cmd.tabela)
+            var plano: Opt.PlanoConsulta = isto.otimizador.planejarSelecao(cmd, tabBase)
+            res.planoTexto = plano.descrever()
+            se (plano.condicaoOtimizada != nulo) { condFinal = plano.condicaoOtimizada }
+
+            para (var c: inteiro = 0; c < tabBase.colunas.tamanho(); c = c + 1) {
+                nomesCols.adicionar(tabBase.colunas[c].nome)
+                tabsCols.adicionar(apelidoBase)
+            }
+
+            se (plano.estrategia == Opt.EstrategiaAcesso.BuscaIndiceExata) {
+                var arvEx = BTree.ArvoreBMais(isto.pager, plano.paginaRaizIndice, falso)
+                var ridsEx: Reg.IdRegistro[] = arvEx.buscarExato(plano.chaveExata)
+                para (var ri: inteiro = 0; ri < ridsEx.tamanho(); ri = ri + 1) {
+                    var recEx: qualquer = isto.armazenamento.lerRegistro(ridsEx[ri])
+                    se (recEx != nulo) { linhasCorrentes.adicionar(recEx) }
+                }
+            } senao se (plano.estrategia == Opt.EstrategiaAcesso.VarreduraIndiceIntervalo) {
+                var arvInt = BTree.ArvoreBMais(isto.pager, plano.paginaRaizIndice, falso)
+                var ridsInt: Reg.IdRegistro[] = arvInt.buscarIntervalo(plano.chaveMin, plano.incluirMin, plano.chaveMax, plano.incluirMax)
+                para (var rj: inteiro = 0; rj < ridsInt.tamanho(); rj = rj + 1) {
+                    var recInt: qualquer = isto.armazenamento.lerRegistro(ridsInt[rj])
+                    se (recInt != nulo) { linhasCorrentes.adicionar(recInt) }
+                }
+            } senao {
+                var recsSeq: Reg.RegistroLido[] = isto.armazenamento.varrerTabela(tabBase.paginaRaizDados)
+                para (var rk: inteiro = 0; rk < recsSeq.tamanho(); rk = rk + 1) {
+                    linhasCorrentes.adicionar(recsSeq[rk].valores)
+                }
             }
         }
         isto.linhasProcessadas = isto.linhasProcessadas + linhasCorrentes.tamanho()
@@ -743,12 +950,11 @@ classe MotorProprio {
             linhasCorrentes = linhasJuncao
         }
 
-        // 3. Filtro ONDE (usando condição otimizada)
-        var condFinal: qualquer = plano.condicaoOtimizada != nulo ? plano.condicaoOtimizada : cmd.condicaoOnde
+        // 3. Filtro ONDE (usando condição otimizada e passando escopoPai + executor para subconsultas correlacionadas)
         var linhasFiltradas: qualquer[] = []
         se (condFinal != nulo) {
             para (var fi: inteiro = 0; fi < linhasCorrentes.tamanho(); fi = fi + 1) {
-                var ctxF = Eval.ContextoLinha(nomesCols, tabsCols, linhasCorrentes[fi], paramsPos, paramsNom)
+                var ctxF = Eval.ContextoLinha(nomesCols, tabsCols, linhasCorrentes[fi], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
                 se (Eval.avaliarCondicao(condFinal, ctxF)) {
                     linhasFiltradas.adicionar(linhasCorrentes[fi])
                 }
@@ -757,11 +963,12 @@ classe MotorProprio {
             linhasFiltradas = linhasCorrentes
         }
 
-        // 4. Verifica se há agregação ou AGRUPAR POR
+        // 4. Verifica se há agregação de grupo (função agregadora SEM cláusula SOBRE) ou AGRUPAR POR
         var temAgregacao: logico = cmd.agruparPor.tamanho() > 0
         se (!temAgregacao) {
             para (var agi: inteiro = 0; agi < cmd.itensSelecao.tamanho(); agi = agi + 1) {
-                se (expressaoContemAgregacao(cmd.itensSelecao[agi].expressao)) {
+                var exAgi: Ast.Expressao = cmd.itensSelecao[agi].expressao
+                se (exAgi.janela == nulo e expressaoContemAgregacao(exAgi)) {
                     temAgregacao = verdadeiro
                     sustar
                 }
@@ -825,7 +1032,16 @@ classe MotorProprio {
                 linhasProjetadas.adicionar(linhaProj)
             }
         } senao {
-            // Projeção simples (expandindo '*')
+            // Pré-calcula colunas de funções de janela (SOBRE (...)), se houver
+            var valoresJanelas: dicionario = {}
+            para (var jiW: inteiro = 0; jiW < cmd.itensSelecao.tamanho(); jiW = jiW + 1) {
+                var exW: Ast.Expressao = cmd.itensSelecao[jiW].expressao
+                se (exW.tipoExpr == Ast.TipoExpressao.Chamada e exW.janela != nulo) {
+                    valoresJanelas[texto(jiW)] = isto.calcularJanela(exW, linhasFiltradas, nomesCols, tabsCols, paramsPos, paramsNom)
+                }
+            }
+
+            // Projeção simples (expandindo '*', subconsultas escalares e funções de janela)
             para (var pi2: inteiro = 0; pi2 < cmd.itensSelecao.tamanho(); pi2 = pi2 + 1) {
                 var it2: Ast.ItemSelecao = cmd.itensSelecao[pi2]
                 se (it2.expressao.tipoExpr == Ast.TipoExpressao.Asterisco) {
@@ -845,7 +1061,7 @@ classe MotorProprio {
 
             para (var li2: inteiro = 0; li2 < linhasFiltradas.tamanho(); li2 = li2 + 1) {
                 var linhaIn: Val.Valor[] = linhasFiltradas[li2]
-                var ctxP = Eval.ContextoLinha(nomesCols, tabsCols, linhaIn, paramsPos, paramsNom)
+                var ctxP = Eval.ContextoLinha(nomesCols, tabsCols, linhaIn, paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
                 var linhaOut: Val.Valor[] = []
                 para (var ps: inteiro = 0; ps < cmd.itensSelecao.tamanho(); ps = ps + 1) {
                     var itP: Ast.ItemSelecao = cmd.itensSelecao[ps]
@@ -855,6 +1071,8 @@ classe MotorProprio {
                                 linhaOut.adicionar(linhaIn[nc2])
                             }
                         }
+                    } senao se (valoresJanelas.contem(texto(ps))) {
+                        linhaOut.adicionar(valoresJanelas[texto(ps)][li2])
                     } senao {
                         linhaOut.adicionar(Eval.avaliarExpressao(itP.expressao, ctxP))
                     }
@@ -886,31 +1104,32 @@ classe MotorProprio {
             linhasProjetadas = unicas
         }
 
-        // 6. ORDENAR POR (MergeSort estável)
+        // 6. ORDENAR POR (OrdenadorExterno com orçamento configurável e estabilidade garantida)
         se (cmd.ordenarPor.tamanho() > 0 e linhasProjetadas.tamanho() > 1) {
             var tabsVazias: texto[] = []
             para (var tv: inteiro = 0; tv < nomesSaida.tamanho(); tv = tv + 1) { tabsVazias.adicionar("") }
             var chavesOrd: qualquer[] = []
-            var indicesOrd: inteiro[] = []
             var descFlags: logico[] = []
             para (var od: inteiro = 0; od < cmd.ordenarPor.tamanho(); od = od + 1) {
                 descFlags.adicionar(cmd.ordenarPor[od].descendente)
             }
             para (var oi: inteiro = 0; oi < linhasProjetadas.tamanho(); oi = oi + 1) {
-                var ctxO = Eval.ContextoLinha(nomesSaida, tabsVazias, linhasProjetadas[oi], paramsPos, paramsNom)
+                var paiOrd: qualquer = nulo
+                se (!temAgregacao e !cmd.distinto e linhasProjetadas.tamanho() == linhasFiltradas.tamanho()) {
+                    paiOrd = Eval.ContextoLinha(nomesCols, tabsCols, linhasFiltradas[oi], paramsPos, paramsNom, isto.escopoPaiAtivo, isto)
+                }
+                var ctxO = Eval.ContextoLinha(nomesSaida, tabsVazias, linhasProjetadas[oi], paramsPos, paramsNom, paiOrd, isto)
                 var chLinha: Val.Valor[] = []
                 para (var ok: inteiro = 0; ok < cmd.ordenarPor.tamanho(); ok = ok + 1) {
                     chLinha.adicionar(Eval.avaliarExpressao(cmd.ordenarPor[ok].expressao, ctxO))
                 }
                 chavesOrd.adicionar(chLinha)
-                indicesOrd.adicionar(oi)
             }
-            var ordenadosIdx: inteiro[] = ordenarIndicesMerge(indicesOrd, chavesOrd, descFlags)
-            var reordenadas: qualquer[] = []
-            para (var rIdx: inteiro = 0; rIdx < ordenadosIdx.tamanho(); rIdx = rIdx + 1) {
-                reordenadas.adicionar(linhasProjetadas[ordenadosIdx[rIdx]])
+            var extOrd = ExtSort.OrdenadorExterno(isto.orcamentoOrdenacaoBytes)
+            linhasProjetadas = extOrd.ordenar(linhasProjetadas, chavesOrd, descFlags)
+            se (extOrd.usouDisco) {
+                isto.ordenacoesExternasExecutadas = isto.ordenacoesExternasExecutadas + 1
             }
-            linhasProjetadas = reordenadas
         }
 
         // 7. LIMITE e DESLOCAMENTO
@@ -928,6 +1147,7 @@ classe MotorProprio {
         res.colunas = nomesSaida
         res.linhas = linhasProjetadas
         isto.linhasRetornadas = isto.linhasRetornadas + linhasProjetadas.tamanho()
+        isto.tabelasCteAtivas = ctesAnteriores
         retorna res
     }
 
@@ -1037,7 +1257,7 @@ classe MotorProprio {
         }
         Pio.PosixIO.fflush(fpDest)
         Pio.PosixIO.fdatasync(fdDest)
-        Pio.PosixIO.close(fdDest)
+        Pio.PosixIO.fclose(fpDest)
     }
 
     // Estatísticas detalhadas do motor + telemetria do CGD-GC.

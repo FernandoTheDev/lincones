@@ -1,0 +1,94 @@
+importar armazenamento.posix_io como Pio
+importar execucao.motor_proprio como Motor
+
+funcao afirmar(condicao: logico, msg: texto): vazio {
+    se (!condicao) {
+        falhar "FALHA OVERFLOW/EXTSORT: " + msg
+    }
+}
+
+funcao repetirBloco(bloco: texto, vezes: inteiro): texto {
+    var acc: texto = ""
+    var passo: texto = bloco
+    var n: inteiro = vezes
+    enquanto (n > 0) {
+        se ((n & 1) != 0) { acc = acc + passo }
+        n = n >> 1
+        se (n > 0) { passo = passo + passo }
+    }
+    retorna acc
+}
+
+const caminhoBanco: texto = "/tmp/lincones_teste_overflow.lce"
+Pio.PosixIO.unlink(caminhoBanco)
+Pio.PosixIO.unlink(caminhoBanco + "-wal")
+
+// 1. Testes de Páginas de Overflow: 4001 B, 8 KiB, 64 KiB e 1 MiB
+var db = Motor.MotorProprio(caminhoBanco, 16, verdadeiro, falso)
+db.abrir()
+db.executar("CRIAR TABELA docs (id INTEIRO CHAVE PRIMARIA, titulo TEXTO(40), corpo TEXTO);")
+
+var txt4001: texto = repetirBloco("A", 4001)
+var txt8k: texto = repetirBloco("0123456789ABCDEF", 512)        // 8192 bytes
+var txt64k: texto = repetirBloco("LinConEsOverflow", 4096)       // 65536 bytes
+var txt1m: texto = repetirBloco("0123456789abcdef", 65536)       // 1048576 bytes (1 MiB!)
+
+db.executar("INSERIR EM docs (id, titulo, corpo) VALORES (?, ?, ?);", [1, "4001B", txt4001])
+db.executar("INSERIR EM docs (id, titulo, corpo) VALORES (?, ?, ?);", [2, "8KiB", txt8k])
+db.executar("INSERIR EM docs (id, titulo, corpo) VALORES (?, ?, ?);", [3, "64KiB", txt64k])
+db.executar("INSERIR EM docs (id, titulo, corpo) VALORES (?, ?, ?);", [4, "1MiB", txt1m])
+
+// Rollback transacional de registro com overflow
+db.executar("INICIAR TRANSACAO;")
+db.executar("INSERIR EM docs (id, titulo, corpo) VALORES (?, ?, ?);", [5, "Revertido", txt64k])
+db.executar("REVERTER;")
+
+// Atualização de overflow (64 KiB -> inline pequeno) e exclusão (8 KiB)
+db.executar("ATUALIZAR docs DEFINIR corpo = ? ONDE id = 3;", ["agora_pequeno"])
+db.executar("EXCLUIR DE docs ONDE id = 2;")
+
+afirmar(db.verificarIntegridade().tamanho() == 0, "Integridade com overflow falhou")
+db.fechar()
+
+// Reabrir do disco e validar reconstrução exata de 4001B e 1MiB!
+var db2 = Motor.MotorProprio(caminhoBanco, 16, verdadeiro, falso)
+db2.abrir()
+var r1 = db2.executar("SELECIONAR corpo DE docs ONDE id = 1;")
+afirmar(r1.linhas.tamanho() == 1 e r1.linhas[0][0].textoVal.tamanho() == 4001, "4001B falhou na releitura")
+var r3 = db2.executar("SELECIONAR corpo DE docs ONDE id = 3;")
+afirmar(r3.linhas.tamanho() == 1 e r3.linhas[0][0].textoVal == "agora_pequeno", "Atualização overflow->inline falhou")
+var r4 = db2.executar("SELECIONAR corpo DE docs ONDE id = 4;")
+afirmar(r4.linhas.tamanho() == 1 e r4.linhas[0][0].textoVal.tamanho() == 1048576, "1MiB falhou na releitura: " + texto(r4.linhas[0][0].textoVal.tamanho()))
+afirmar(db2.executar("SELECIONAR CONTAR(*) DE docs;").linhas[0][0].inteiroVal == 3, "Devem existir exatamente 3 docs")
+db2.fechar()
+Pio.PosixIO.unlink(caminhoBanco)
+Pio.PosixIO.unlink(caminhoBanco + "-wal")
+
+// 2. Teste de Ordenação Externa (orçamento pequeno de 2 KiB forçando múltiplas runs em disco)
+var dbSort = Motor.MotorProprio(":memoria:", 64, falso, falso)
+dbSort.abrir()
+dbSort.executar("CRIAR TABELA itens (id INTEIRO CHAVE PRIMARIA, grupo INTEIRO, nome TEXTO(60));")
+dbSort.executar("INICIAR TRANSACAO;")
+para (var i: inteiro = 1; i <= 120; i = i + 1) {
+    var grp: inteiro = (i * 17) % 10
+    dbSort.executar("INSERIR EM itens (id, grupo, nome) VALORES (?, ?, ?);", [i, grp, "registro_ordenacao_" + texto(i)])
+}
+dbSort.executar("CONFIRMAR;")
+
+// Ordenação em memória (referência)
+dbSort.orcamentoOrdenacaoBytes = 10485760
+var resMem = dbSort.executar("SELECIONAR id, grupo, nome DE itens ORDENAR POR grupo CRESCENTE, id DECRESCENTE;")
+afirmar(dbSort.ordenacoesExternasExecutadas == 0, "Referência deveria ordenar em memória")
+
+// Ordenação externa forçada (orçamento 2048 bytes -> ~10+ runs temporárias em disco!)
+dbSort.orcamentoOrdenacaoBytes = 2048
+var resExt = dbSort.executar("SELECIONAR id, grupo, nome DE itens ORDENAR POR grupo CRESCENTE, id DECRESCENTE;")
+afirmar(dbSort.ordenacoesExternasExecutadas == 1, "Deveria ter usado ordenação externa em disco")
+afirmar(resMem.linhas.tamanho() == resExt.linhas.tamanho(), "Contagem difere entre memória e disco")
+para (var k: inteiro = 0; k < resMem.linhas.tamanho(); k = k + 1) {
+    afirmar(resMem.linhas[k][0].inteiroVal == resExt.linhas[k][0].inteiroVal, "Divergência na linha " + texto(k))
+    afirmar(resMem.linhas[k][1].inteiroVal == resExt.linhas[k][1].inteiroVal, "Divergência de grupo na linha " + texto(k))
+}
+dbSort.fechar()
+
+escreva("overflow_e_ordenacao_externa_teste: OK")

@@ -1,0 +1,258 @@
+modulo execucao.ordenacao_externa
+
+importar cgd.dados.binario como Bin
+importar cgd.sistema.processos como Proc
+importar armazenamento.posix_io como Pio
+importar armazenamento.registros como Reg
+importar tipos.valor como Val
+
+// Item ordenável com chave composta, sequência original (para estabilidade garantida) e linha completa.
+classe ItemOrdenacaoExterna {
+    chaves: Val.Valor[]
+    seqOriginal: inteiro
+    linha: Val.Valor[]
+
+    construtor(chaves: Val.Valor[], seqOriginal: inteiro, linha: Val.Valor[]) {
+        isto.chaves = chaves
+        isto.seqOriginal = seqOriginal
+        isto.linha = linha
+    }
+}
+
+funcao estimarBytesLinha(linha: Val.Valor[], chaves: Val.Valor[]): inteiro {
+    var total: inteiro = 64
+    para (var i: inteiro = 0; i < linha.tamanho(); i = i + 1) {
+        var v: Val.Valor = linha[i]
+        total = total + 32 + v.textoVal.tamanho()
+    }
+    para (var k: inteiro = 0; k < chaves.tamanho(); k = k + 1) {
+        total = total + 24 + chaves[k].textoVal.tamanho()
+    }
+    retorna total
+}
+
+funcao compararItens(a: ItemOrdenacaoExterna, b: ItemOrdenacaoExterna, descendentes: logico[]): inteiro {
+    para (var i: inteiro = 0; i < a.chaves.tamanho(); i = i + 1) {
+        var cmp: inteiro = Val.compararTotal(a.chaves[i], b.chaves[i])
+        se (cmp != 0) {
+            retorna descendentes[i] ? -cmp : cmp
+        }
+    }
+    // Desempate determinístico pela sequência original preserva estabilidade mesmo entre runs externas!
+    se (a.seqOriginal < b.seqOriginal) { retorna -1 }
+    se (a.seqOriginal > b.seqOriginal) { retorna 1 }
+    retorna 0
+}
+
+funcao ordenarLoteMerge(itens: ItemOrdenacaoExterna[], descendentes: logico[]): ItemOrdenacaoExterna[] {
+    var n: inteiro = itens.tamanho()
+    se (n <= 1) { retorna itens }
+    var meio: inteiro = n \ 2
+    var esq: ItemOrdenacaoExterna[] = []
+    var dir: ItemOrdenacaoExterna[] = []
+    para (var i: inteiro = 0; i < n; i = i + 1) {
+        se (i < meio) { esq.adicionar(itens[i]) } senao { dir.adicionar(itens[i]) }
+    }
+    esq = ordenarLoteMerge(esq, descendentes)
+    dir = ordenarLoteMerge(dir, descendentes)
+    var res: ItemOrdenacaoExterna[] = []
+    var ie: inteiro = 0
+    var id: inteiro = 0
+    enquanto (ie < esq.tamanho() e id < dir.tamanho()) {
+        se (compararItens(esq[ie], dir[id], descendentes) <= 0) {
+            res.adicionar(esq[ie])
+            ie = ie + 1
+        } senao {
+            res.adicionar(dir[id])
+            id = id + 1
+        }
+    }
+    enquanto (ie < esq.tamanho()) { res.adicionar(esq[ie]); ie = ie + 1 }
+    enquanto (id < dir.tamanho()) { res.adicionar(dir[id]); id = id + 1 }
+    retorna res
+}
+
+// Leitor sequencial de uma sequência ordenada (run) persistida em arquivo temporário.
+classe LeitorSequenciaTemp {
+    caminho: texto
+    fd: inteiro
+    fp: inteiro
+    restantes: inteiro
+    atual: qualquer
+
+    construtor(caminho: texto, quantidade: inteiro) {
+        isto.caminho = caminho
+        isto.restantes = quantidade
+        isto.atual = nulo
+        isto.fd = Pio.PosixIO.open(caminho, 0, 0) // O_RDONLY
+        se (isto.fd < 0) { falhar "Falha ao abrir arquivo temporário de ordenação: " + caminho }
+        isto.fp = Pio.PosixIO.fdopen(isto.fd, "rb")
+        isto.avancar()
+    }
+
+    lerU32(): inteiro {
+        var b0: inteiro = Pio.PosixIO.fgetc(isto.fp)
+        var b1: inteiro = Pio.PosixIO.fgetc(isto.fp)
+        var b2: inteiro = Pio.PosixIO.fgetc(isto.fp)
+        var b3: inteiro = Pio.PosixIO.fgetc(isto.fp)
+        se (b0 < 0 ou b1 < 0 ou b2 < 0 ou b3 < 0) { falhar "EOF inesperado em arquivo temporário de ordenação." }
+        retorna b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    }
+
+    lerBlocoBytes(tam: inteiro): Bin.Bytes {
+        var buf: Bin.Bytes = Bin.Bytes.criar(tam)
+        var i: inteiro = 0
+        enquanto (i < tam) {
+            var b: inteiro = Pio.PosixIO.fgetc(isto.fp)
+            se (b < 0) { falhar "EOF inesperado ao ler registro temporário." }
+            buf.definir(i, b)
+            i = i + 1
+        }
+        retorna buf
+    }
+
+    avancar(): vazio {
+        se (isto.restantes <= 0) {
+            isto.atual = nulo
+            retorna
+        }
+        isto.restantes = isto.restantes - 1
+        var seq: inteiro = isto.lerU32()
+        var tamCh: inteiro = isto.lerU32()
+        var bufCh: Bin.Bytes = isto.lerBlocoBytes(tamCh)
+        var tamLin: inteiro = isto.lerU32()
+        var bufLin: Bin.Bytes = isto.lerBlocoBytes(tamLin)
+        var chs: Val.Valor[] = Reg.desserializarTupla(bufCh, 0, tamCh)
+        var lin: Val.Valor[] = Reg.desserializarTupla(bufLin, 0, tamLin)
+        isto.atual = ItemOrdenacaoExterna(chs, seq, lin)
+    }
+
+    fecharERemover(): vazio {
+        se (isto.fp != 0) {
+            Pio.PosixIO.fclose(isto.fp)
+            isto.fp = 0
+            isto.fd = -1
+        }
+        Pio.PosixIO.unlink(isto.caminho)
+    }
+}
+
+// Ordenador Externo com orçamento configurável em bytes, criação exclusiva de temporários (O_EXCL | 0600)
+// e intercalação k-way estável com limpeza garantida.
+classe OrdenadorExterno {
+    orcamentoBytes: inteiro
+    sequenciasGeradas: inteiro
+    bytesTemporarios: inteiro
+    usouDisco: logico
+    contadorRun: inteiro
+
+    construtor(orcamentoBytes: inteiro = 4194304) {
+        isto.orcamentoBytes = orcamentoBytes > 512 ? orcamentoBytes : 512
+        isto.sequenciasGeradas = 0
+        isto.bytesTemporarios = 0
+        isto.usouDisco = falso
+        isto.contadorRun = 0
+    }
+
+    gravarRunTemp(loteOrdenado: ItemOrdenacaoExterna[]): texto {
+        isto.contadorRun = isto.contadorRun + 1
+        var pid: inteiro = Proc.Processo.identificador()
+        var caminho: texto = "/tmp/lincones_extsort_${pid}_${isto.contadorRun}.tmp"
+        Pio.PosixIO.unlink(caminho)
+        // O_RDWR(2) | O_CREAT(64) | O_EXCL(128) = 194, modo 0600 = 384
+        var fd: inteiro = Pio.PosixIO.open(caminho, 194, 384)
+        se (fd < 0) { falhar "Falha ao criar arquivo temporário exclusivo: " + caminho }
+        var fp: inteiro = Pio.PosixIO.fdopen(fd, "w+b")
+
+        para (var i: inteiro = 0; i < loteOrdenado.tamanho(); i = i + 1) {
+            var it: ItemOrdenacaoExterna = loteOrdenado[i]
+            var bCh: Bin.Bytes = Reg.serializarTupla(it.chaves)
+            var bLin: Bin.Bytes = Reg.serializarTupla(it.linha)
+            var cab: Bin.Bytes = Bin.Bytes.criarReservado(12)
+            cab.anexarU32LE(it.seqOriginal)
+            cab.anexarU32LE(bCh.tamanho())
+            // Escreve seq + tamCh + bCh + tamLin + bLin
+            para (var c: inteiro = 0; c < 8; c = c + 1) { Pio.PosixIO.fputc(cab.obter(c), fp) }
+            para (var k1: inteiro = 0; k1 < bCh.tamanho(); k1 = k1 + 1) { Pio.PosixIO.fputc(bCh.obter(k1), fp) }
+            var tamLB: Bin.Bytes = Bin.Bytes.criarReservado(4)
+            tamLB.anexarU32LE(bLin.tamanho())
+            para (var c2: inteiro = 0; c2 < 4; c2 = c2 + 1) { Pio.PosixIO.fputc(tamLB.obter(c2), fp) }
+            para (var k2: inteiro = 0; k2 < bLin.tamanho(); k2 = k2 + 1) { Pio.PosixIO.fputc(bLin.obter(k2), fp) }
+            isto.bytesTemporarios = isto.bytesTemporarios + 12 + bCh.tamanho() + bLin.tamanho()
+        }
+        Pio.PosixIO.fflush(fp)
+        Pio.PosixIO.fclose(fp)
+        isto.sequenciasGeradas = isto.sequenciasGeradas + 1
+        retorna caminho
+    }
+
+    ordenar(linhas: qualquer[], chaves: qualquer[], descendentes: logico[]): qualquer[] {
+        var n: inteiro = linhas.tamanho()
+        se (n <= 1) { retorna linhas }
+
+        // Acumula lotes respeitando orcamentoBytes
+        var caminhosRuns: texto[] = []
+        var tamanhosRuns: inteiro[] = []
+        var loteAtual: ItemOrdenacaoExterna[] = []
+        var bytesLote: inteiro = 0
+
+        para (var i: inteiro = 0; i < n; i = i + 1) {
+            var it = ItemOrdenacaoExterna(chaves[i], i, linhas[i])
+            var custo: inteiro = estimarBytesLinha(linhas[i], chaves[i])
+            se (loteAtual.tamanho() > 0 e (bytesLote + custo) > isto.orcamentoBytes) {
+                var ordLote = ordenarLoteMerge(loteAtual, descendentes)
+                caminhosRuns.adicionar(isto.gravarRunTemp(ordLote))
+                tamanhosRuns.adicionar(ordLote.tamanho())
+                loteAtual = []
+                bytesLote = 0
+            }
+            loteAtual.adicionar(it)
+            bytesLote = bytesLote + custo
+        }
+
+        // Se tudo coube no orçamento em um único lote, retorna direto em memória (sem I/O)
+        se (caminhosRuns.tamanho() == 0) {
+            isto.usouDisco = falso
+            var ordUnico = ordenarLoteMerge(loteAtual, descendentes)
+            var saidaMem: qualquer[] = []
+            para (var m: inteiro = 0; m < ordUnico.tamanho(); m = m + 1) {
+                saidaMem.adicionar(ordUnico[m].linha)
+            }
+            retorna saidaMem
+        }
+
+        // Grava o último lote e executa intercalação K-Way com limpeza garantida
+        isto.usouDisco = verdadeiro
+        se (loteAtual.tamanho() > 0) {
+            var ordUlt = ordenarLoteMerge(loteAtual, descendentes)
+            caminhosRuns.adicionar(isto.gravarRunTemp(ordUlt))
+            tamanhosRuns.adicionar(ordUlt.tamanho())
+        }
+
+        var leitores: LeitorSequenciaTemp[] = []
+        var resultado: qualquer[] = []
+        tente {
+            para (var r: inteiro = 0; r < caminhosRuns.tamanho(); r = r + 1) {
+                leitores.adicionar(LeitorSequenciaTemp(caminhosRuns[r], tamanhosRuns[r]))
+            }
+            enquanto (verdadeiro) {
+                var melhorIdx: inteiro = -1
+                para (var k: inteiro = 0; k < leitores.tamanho(); k = k + 1) {
+                    se (leitores[k].atual != nulo) {
+                        se (melhorIdx < 0 ou compararItens(leitores[k].atual, leitores[melhorIdx].atual, descendentes) < 0) {
+                            melhorIdx = k
+                        }
+                    }
+                }
+                se (melhorIdx < 0) { sustar }
+                resultado.adicionar(leitores[melhorIdx].atual.linha)
+                leitores[melhorIdx].avancar()
+            }
+        } finalmente {
+            para (var f: inteiro = 0; f < leitores.tamanho(); f = f + 1) {
+                leitores[f].fecharERemover()
+            }
+        }
+        retorna resultado
+    }
+}

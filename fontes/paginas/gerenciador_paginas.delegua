@@ -387,7 +387,11 @@ classe GerenciadorPaginas {
         se (!isto.emMemoria) {
             isto.descarregarTodas()
             Pio.PosixIO.flock(isto.fd, Pio.destravar())
-            Pio.PosixIO.close(isto.fd)
+            se (isto.fp != 0) {
+                Pio.PosixIO.fclose(isto.fp)
+            } senao se (isto.fd >= 0) {
+                Pio.PosixIO.close(isto.fd)
+            }
             isto.fd = -1
             isto.fp = 0
         }

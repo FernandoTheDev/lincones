@@ -9,15 +9,17 @@ classe estrangeira PosixIO {
     @definicao(simbolo = "close")
     estatico close(fd: cint): cint;
     @definicao(simbolo = "fdopen")
-    estatico fdopen(fd: cint, modo: texto): cu64;
+    estatico fdopen(fd: cint, modo: texto): cponteiro;
+    @definicao(simbolo = "fclose")
+    estatico fclose(fp: cponteiro): cint;
     @definicao(simbolo = "fseeko")
-    estatico fseeko(fp: cu64, offset: ci64, whence: cint): cint;
+    estatico fseeko(fp: cponteiro, offset: ci64, whence: cint): cint;
     @definicao(simbolo = "fgetc_unlocked")
-    estatico fgetc(fp: cu64): cint;
+    estatico fgetc(fp: cponteiro): cint;
     @definicao(simbolo = "fputc_unlocked")
-    estatico fputc(c: cint, fp: cu64): cint;
+    estatico fputc(c: cint, fp: cponteiro): cint;
     @definicao(simbolo = "fflush_unlocked")
-    estatico fflush(fp: cu64): cint;
+    estatico fflush(fp: cponteiro): cint;
     @definicao(simbolo = "fsync")
     estatico fsync(fd: cint): cint;
     @definicao(simbolo = "fdatasync")

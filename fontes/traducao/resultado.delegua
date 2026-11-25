@@ -82,6 +82,14 @@ funcao traduzirNomeFuncao(nomeMaiusculo: texto, dialeto: DialetoSQL): texto {
                 retorna "COALESCE"
             }
             retorna "IFNULL"
+        caso "NUMERO_LINHA": retorna "ROW_NUMBER"
+        caso "CLASSIFICACAO": retorna "RANK"
+        caso "CLASSIFICAÇÃO": retorna "RANK"
+        caso "CLASSIFICACAO_DENSA": retorna "DENSE_RANK"
+        caso "CLASSIFICAÇÃO_DENSA": retorna "DENSE_RANK"
+        caso "ANTERIOR": retorna "LAG"
+        caso "PROXIMO": retorna "LEAD"
+        caso "PRÓXIMO": retorna "LEAD"
     }
     retorna nomeMaiusculo
 }
@@ -280,7 +288,39 @@ classe TradutorBase {
                     se (a > 0) { argsStr = argsStr + ", " }
                     argsStr = argsStr + isto.traduzirExpressao(expr.argumentos[a], res)
                 }
-                retorna "${fnSql}(${argsStr})"
+                var baseCall: texto = "${fnSql}(${argsStr})"
+                se (expr.janela != nulo) {
+                    var jan: Ast.EspecificacaoJanela = expr.janela
+                    var overStr: texto = ""
+                    se (jan.particionarPor.tamanho() > 0) {
+                        overStr = "PARTITION BY "
+                        para (var jp: inteiro = 0; jp < jan.particionarPor.tamanho(); jp = jp + 1) {
+                            se (jp > 0) { overStr = overStr + ", " }
+                            overStr = overStr + isto.traduzirExpressao(jan.particionarPor[jp], res)
+                        }
+                    }
+                    se (jan.ordenarPor.tamanho() > 0) {
+                        se (overStr != "") { overStr = overStr + " " }
+                        overStr = overStr + "ORDER BY "
+                        para (var jo: inteiro = 0; jo < jan.ordenarPor.tamanho(); jo = jo + 1) {
+                            se (jo > 0) { overStr = overStr + ", " }
+                            var ordJ: Ast.ItemOrdenacao = jan.ordenarPor[jo]
+                            overStr = overStr + isto.traduzirExpressao(ordJ.expressao, res) + (ordJ.descendente ? " DESC" : " ASC")
+                        }
+                    }
+                    retorna "${baseCall} OVER (${overStr})"
+                }
+                retorna baseCall
+            caso Ast.TipoExpressao.Subconsulta:
+                var subS = isto.traduzirComando(expr.subconsulta)
+                retorna "(" + subS.sql + ")"
+            caso Ast.TipoExpressao.Existe:
+                var subEx = isto.traduzirComando(expr.subconsulta)
+                retorna (expr.negado ? "NOT EXISTS (" : "EXISTS (") + subEx.sql + ")"
+            caso Ast.TipoExpressao.EmSubconsulta:
+                var alvoSub: texto = isto.traduzirExpressao(expr.esquerda, res)
+                var subEm = isto.traduzirComando(expr.subconsulta)
+                retorna alvoSub + (expr.negado ? " NOT IN (" : " IN (") + subEm.sql + ")"
         }
         retorna ""
     }
@@ -371,7 +411,18 @@ classe TradutorBase {
                 }
                 res.sql = sIns
             caso Ast.TipoComando.Selecionar:
-                var sSel: texto = "SELECT "
+                var sSel: texto = ""
+                se (cmd.ctes.tamanho() > 0) {
+                    sSel = "WITH "
+                    para (var ciC: inteiro = 0; ciC < cmd.ctes.tamanho(); ciC = ciC + 1) {
+                        se (ciC > 0) { sSel = sSel + ", " }
+                        var cte: Ast.DefinicaoCte = cmd.ctes[ciC]
+                        var subCte = isto.traduzirComando(cte.consulta)
+                        sSel = sSel + isto.ident(cte.nome) + " AS (" + subCte.sql + ")"
+                    }
+                    sSel = sSel + " "
+                }
+                sSel = sSel + "SELECT "
                 se (cmd.distinto) { sSel = sSel + "DISTINCT " }
                 para (var si: inteiro = 0; si < cmd.itensSelecao.tamanho(); si = si + 1) {
                     se (si > 0) { sSel = sSel + ", " }

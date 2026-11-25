@@ -102,14 +102,25 @@ classe AnalisadorSemantico {
             retorna
         }
         se (isto.catalogo != nulo e cmd.tabela != "") {
+            var ehCte: logico = falso
+            para (var ci: inteiro = 0; ci < cmd.ctes.tamanho(); ci = ci + 1) {
+                se (cmd.ctes[ci].nome.minusculo() == cmd.tabela.minusculo()) {
+                    ehCte = verdadeiro
+                    sustar
+                }
+            }
             var tab: qualquer = isto.catalogo.obterTabela(cmd.tabela)
-            se (tab == nulo) {
+            se (tab == nulo e !ehCte) {
                 isto.diagnosticos.erro("SEM021", "semantico", "Tabela '${cmd.tabela}' não encontrada.", cmd.intervalo)
                 retorna
             }
             para (var j: inteiro = 0; j < cmd.juncoes.tamanho(); j = j + 1) {
                 var junc: Ast.ClausulaJuncao = cmd.juncoes[j]
-                se (isto.catalogo.obterTabela(junc.tabela) == nulo) {
+                var ehCteJ: logico = falso
+                para (var cj: inteiro = 0; cj < cmd.ctes.tamanho(); cj = cj + 1) {
+                    se (cmd.ctes[cj].nome.minusculo() == junc.tabela.minusculo()) { ehCteJ = verdadeiro; sustar }
+                }
+                se (!ehCteJ e isto.catalogo.obterTabela(junc.tabela) == nulo) {
                     isto.diagnosticos.erro("SEM022", "semantico", "Tabela de junção '${junc.tabela}' não encontrada.", cmd.intervalo)
                 }
             }

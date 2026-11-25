@@ -1,0 +1,85 @@
+// Fuzzing intensificado 10x (4000 iterações do parser + 1500 operações no MotorProprio em 3 sementes)
+// para validar ausência de corrupção sob pressão prolongada do CGD-GC.
+importar sintatico.parser como Par
+importar execucao.motor_proprio como Motor
+
+classe Prng {
+    estado: inteiro
+    construtor(semente: inteiro) { isto.estado = semente }
+    proximo(): inteiro {
+        isto.estado = (isto.estado * 1103515245 + 12345) & 2147483647
+        retorna isto.estado
+    }
+    faixa(maxExcl: inteiro): inteiro {
+        se (maxExcl <= 0) { retorna 0 }
+        retorna isto.proximo() % maxExcl
+    }
+}
+
+funcao afirmar(cond: logico, msg: texto): vazio {
+    se (!cond) { falhar "FALHA FUZZ 10X: " + msg }
+}
+
+var sementes: inteiro[] = [1337, 99991, 202611]
+var vocab: texto[] = [
+    "SELECIONAR", "DE", "ONDE", "INSERIR", "EM", "VALORES", "ATUALIZAR", "DEFINIR",
+    "EXCLUIR", "CRIAR", "TABELA", "INTEIRO", "TEXTO", "LOGICO", "NULO", "COM", "COMO",
+    "EXISTE", "SOBRE", "PARTICIONAR", "ORDENAR", "POR", "LIMITE", "E", "OU", "NAO",
+    "(", ")", ",", ";", "=", ">", "<", "+", "-", "*", "?", "a", "b", "k", "v", "1", "42", "'ok'"
+]
+
+para (var s: inteiro = 0; s < sementes.tamanho(); s = s + 1) {
+    var rng = Prng(sementes[s])
+    // 1. 4000 consultas aleatórias no lexador + parser (10x a carga original)
+    para (var i: inteiro = 0; i < 4000; i = i + 1) {
+        var nTok: inteiro = 1 + rng.faixa(14)
+        var trecho: texto = ""
+        para (var j: inteiro = 0; j < nTok; j = j + 1) {
+            se (j > 0) { trecho = trecho + " " }
+            trecho = trecho + vocab[rng.faixa(vocab.tamanho())]
+        }
+        var resP = Par.AnalisadorSintatico.analisarCodigo(trecho, "", falso)
+        afirmar(resP != nulo, "Parser retornou nulo")
+    }
+
+    // 2. 1500 operações aleatórias no MotorProprio com modelo de referência (10x a carga original)
+    var db = Motor.MotorProprio(":memoria:", 32, falso, falso)
+    db.abrir()
+    db.executar("CRIAR TABELA kv (k INTEIRO CHAVE PRIMARIA, v INTEIRO);")
+    var modelo: dicionario = {}
+    var chaves: inteiro[] = []
+
+    para (var op: inteiro = 0; op < 1500; op = op + 1) {
+        var acao: inteiro = rng.faixa(4)
+        var chave: inteiro = 1 + rng.faixa(80)
+        var sk: texto = texto(chave)
+        var valor: inteiro = rng.faixa(10000)
+
+        se (acao == 0 ou acao == 1) {
+            se (!modelo.contem(sk)) {
+                db.executar("INSERIR EM kv (k, v) VALORES (?, ?);", [chave, valor])
+                modelo[sk] = valor
+                chaves.adicionar(chave)
+            } senao {
+                db.executar("ATUALIZAR kv DEFINIR v = ? ONDE k = ?;", [valor, chave])
+                modelo[sk] = valor
+            }
+        } senao se (acao == 2) {
+            se (modelo.contem(sk)) {
+                db.executar("EXCLUIR DE kv ONDE k = ?;", [chave])
+                modelo.remover(sk)
+            }
+        } senao {
+            var r = db.executar("SELECIONAR v DE kv ONDE k = ?;", [chave])
+            se (modelo.contem(sk)) {
+                afirmar(r.linhas.tamanho() == 1 e r.linhas[0][0].inteiroVal == inteiro(modelo[sk]), "Divergência na semente " + texto(sementes[s]) + " op " + texto(op))
+            } senao {
+                afirmar(r.linhas.tamanho() == 0, "Linha fantasma na semente " + texto(sementes[s]) + " op " + texto(op))
+            }
+        }
+    }
+    afirmar(db.verificarIntegridade().tamanho() == 0, "Integridade falhou na semente " + texto(sementes[s]))
+    db.fechar()
+}
+
+escreva("fuzz_intensivo_10x (3 sementes x 4000 parse + 1500 ops = 12000 parse + 4500 ops): OK")

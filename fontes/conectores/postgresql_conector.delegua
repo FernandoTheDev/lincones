@@ -1,7 +1,6 @@
 modulo conectores.postgresql_conector
 
 importar sintatico.parser como Par
-importar ast.nos como Ast
 importar traducao.postgresql.tradutor como TradPg
 
 // Integração opcional com libpq via compilação condicional (--recurso postgresql).
@@ -10,29 +9,43 @@ importar traducao.postgresql.tradutor como TradPg
 @definicao(biblioteca = "pq", abi = "c")
 classe estrangeira LibPQ {
     @definicao(simbolo = "PQconnectdb")
-    estatico conectar(conninfo: texto): cu64;
+    estatico conectar(conninfo: texto): cponteiro;
     @definicao(simbolo = "PQstatus")
-    estatico status(conn: cu64): cint;
+    estatico status(conn: cponteiro): cint;
     @definicao(simbolo = "PQerrorMessage")
-    estatico mensagemErro(conn: cu64): texto;
+    estatico mensagemErro(conn: cponteiro): texto;
     @definicao(simbolo = "PQexec")
-    estatico executar(conn: cu64, sql: texto): cu64;
+    estatico executar(conn: cponteiro, sql: texto): cponteiro;
     @definicao(simbolo = "PQresultStatus")
-    estatico statusResultado(res: cu64): cint;
+    estatico statusResultado(res: cponteiro): cint;
     @definicao(simbolo = "PQntuples")
-    estatico numLinhas(res: cu64): cint;
+    estatico numLinhas(res: cponteiro): cint;
     @definicao(simbolo = "PQnfields")
-    estatico numColunas(res: cu64): cint;
+    estatico numColunas(res: cponteiro): cint;
     @definicao(simbolo = "PQfname")
-    estatico nomeColuna(res: cu64, col: cint): texto;
+    estatico nomeColuna(res: cponteiro, col: cint): texto;
     @definicao(simbolo = "PQgetvalue")
-    estatico valorCelula(res: cu64, lin: cint, col: cint): texto;
+    estatico valorCelula(res: cponteiro, lin: cint, col: cint): texto;
     @definicao(simbolo = "PQgetisnull")
-    estatico ehNuloCelula(res: cu64, lin: cint, col: cint): cint;
+    estatico ehNuloCelula(res: cponteiro, lin: cint, col: cint): cint;
     @definicao(simbolo = "PQclear")
-    estatico limparResultado(res: cu64): vazio;
+    estatico limparResultado(res: cponteiro): vazio;
     @definicao(simbolo = "PQfinish")
-    estatico finalizar(conn: cu64): vazio;
+    estatico finalizar(conn: cponteiro): vazio;
+    @definicao(simbolo = "PQlibVersion")
+    estatico versaoBiblioteca(): cint;
+}
+
+classe ResultadoPostgreSQL {
+    sqlTraduzido: texto
+    colunas: texto[]
+    linhas: qualquer[]
+
+    construtor(sqlTraduzido: texto) {
+        isto.sqlTraduzido = sqlTraduzido
+        isto.colunas = []
+        isto.linhas = []
+    }
 }
 
 classe ConectorPostgreSQL {
@@ -64,6 +77,16 @@ classe ConectorPostgreSQL {
     }
 
     @quando(Compilacao.temRecurso("postgresql"))
+    versaoLibPQ(): inteiro {
+        retorna LibPQ.versaoBiblioteca()
+    }
+
+    @quando(!Compilacao.temRecurso("postgresql"))
+    versaoLibPQ(): inteiro {
+        retorna 0
+    }
+
+    @quando(Compilacao.temRecurso("postgresql"))
     conectar(conninfo: texto): vazio {
         isto.connHandle = LibPQ.conectar(conninfo)
         se (isto.connHandle == 0 ou LibPQ.status(isto.connHandle) != 0) {
@@ -80,6 +103,66 @@ classe ConectorPostgreSQL {
     @quando(!Compilacao.temRecurso("postgresql"))
     conectar(conninfo: texto): vazio {
         falhar "Conector PostgreSQL (libpq) não habilitado nesta compilação. Recompile com '--recurso postgresql'."
+    }
+
+    @quando(Compilacao.temRecurso("postgresql"))
+    executarSql(sql: texto): ResultadoPostgreSQL {
+        se (!isto.aberto ou isto.connHandle == 0) {
+            falhar "Conexão PostgreSQL não está aberta."
+        }
+        var resPtr: inteiro = LibPQ.executar(isto.connHandle, sql)
+        se (resPtr == 0) {
+            falhar "Falha ao executar SQL no PostgreSQL: " + LibPQ.mensagemErro(isto.connHandle)
+        }
+        var st: inteiro = LibPQ.statusResultado(resPtr)
+        // PGRES_COMMAND_OK = 1, PGRES_TUPLES_OK = 2
+        se (st != 1 e st != 2) {
+            var msg: texto = LibPQ.mensagemErro(isto.connHandle)
+            LibPQ.limparResultado(resPtr)
+            falhar "Erro PostgreSQL (status ${st}): " + msg
+        }
+        var out = ResultadoPostgreSQL(sql)
+        se (st == 2) {
+            var nLin: inteiro = LibPQ.numLinhas(resPtr)
+            var nCol: inteiro = LibPQ.numColunas(resPtr)
+            para (var c: inteiro = 0; c < nCol; c = c + 1) {
+                out.colunas.adicionar(LibPQ.nomeColuna(resPtr, c))
+            }
+            para (var l: inteiro = 0; l < nLin; l = l + 1) {
+                var linha: dicionario = {}
+                para (var c2: inteiro = 0; c2 < nCol; c2 = c2 + 1) {
+                    se (LibPQ.ehNuloCelula(resPtr, l, c2) != 0) {
+                        linha[out.colunas[c2]] = nulo
+                    } senao {
+                        linha[out.colunas[c2]] = LibPQ.valorCelula(resPtr, l, c2)
+                    }
+                }
+                out.linhas.adicionar(linha)
+            }
+        }
+        LibPQ.limparResultado(resPtr)
+        retorna out
+    }
+
+    @quando(!Compilacao.temRecurso("postgresql"))
+    executarSql(sql: texto): ResultadoPostgreSQL {
+        falhar "Conector PostgreSQL não habilitado nesta compilação."
+    }
+
+    executarLinConEs(codigo: texto): ResultadoPostgreSQL {
+        var parsed = Par.AnalisadorSintatico.analisarCodigo(codigo, "", falso)
+        se (parsed.diagnosticos.temErros()) {
+            falhar "Erro ao analisar LinConEs: " + parsed.diagnosticos.formatarTodos()
+        }
+        var ultimo: ResultadoPostgreSQL = ResultadoPostgreSQL("")
+        para (var i: inteiro = 0; i < parsed.comandos.tamanho(); i = i + 1) {
+            var trad = isto.tradutor.traduzir(parsed.comandos[i])
+            se (trad.temErros()) {
+                falhar "Erro na tradução PostgreSQL: " + trad.diagnosticos.formatarTodos()
+            }
+            ultimo = isto.executarSql(trad.sql)
+        }
+        retorna ultimo
     }
 
     @quando(Compilacao.temRecurso("postgresql"))

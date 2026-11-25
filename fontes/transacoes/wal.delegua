@@ -240,11 +240,11 @@ classe GerenciadorWal {
         se (isto.duravel) {
             var sr: inteiro = Pio.PosixIO.fdatasync(fd)
             se (sr != 0) {
-                Pio.PosixIO.close(fd)
+                Pio.PosixIO.fclose(fp)
                 falhar "Falha em fdatasync do arquivo WAL."
             }
         }
-        Pio.PosixIO.close(fd)
+        Pio.PosixIO.fclose(fp)
     }
 
     escreverQuadroWal(
@@ -316,7 +316,7 @@ classe GerenciadorWal {
         para (var i: inteiro = 0; i < 16; i = i + 1) {
             var b: inteiro = Pio.PosixIO.fgetc(fp)
             se (b < 0) {
-                Pio.PosixIO.close(fd)
+                Pio.PosixIO.fclose(fp)
                 Pio.PosixIO.unlink(isto.caminhoWal)
                 retorna 0
             }
@@ -325,7 +325,7 @@ classe GerenciadorWal {
         var crcCabEsperado: inteiro = Fmt.lerU32LE(cab, 12)
         var crcCabCalc: inteiro = Crc.calcularCrc32Bytes(cab, 0, 12)
         se (Fmt.lerU32LE(cab, 0) != assinaturaWal() ou crcCabEsperado != crcCabCalc) {
-            Pio.PosixIO.close(fd)
+            Pio.PosixIO.fclose(fp)
             Pio.PosixIO.unlink(isto.caminhoWal)
             retorna 0
         }
@@ -387,7 +387,7 @@ classe GerenciadorWal {
                 recuperadas = recuperadas + 1
             }
         }
-        Pio.PosixIO.close(fd)
+        Pio.PosixIO.fclose(fp)
 
         se (recuperadas > 0) {
             pager.descarregarTodas()

@@ -43,3 +43,6 @@
 | Transações | `INICIAR TRANSACAO`, `CONFIRMAR`, `REVERTER`, `PONTO DE SALVAMENTO nome`, `REVERTER PARA nome`, `LIBERAR PONTO nome` | Traduzido | Traduzido | Traduzido | WAL + Savepoints |
 | Introspecção / Planos | `EXPLICAR [ANALISAR] <consulta>` | `EXPLAIN QUERY PLAN` | `EXPLAIN [ANALYZE]` | `EXPLAIN` | Plano lógico/físico + telemetria |
 | Tipos estendidos | `REAL`, `DECIMAL(p,s)`, `BINARIO`, `DATA`, `HORARIO`, `INSTANTE` | Mapeado | Mapeado | Mapeado | Nativo |
+| CTEs (não-recursivas) | `COM nome COMO (SELECIONAR ...) [, ...] SELECIONAR ...` | `WITH ... AS (...)` | `WITH ... AS (...)` | `WITH ... AS (...)` | Materialização em cascata (validado vs SQLite) |
+| Subconsultas correlacionadas | `EXISTE (...)`, `NAO EXISTE (...)`, `x EM (SELECIONAR ...)`, escalar `(SELECIONAR ...)` | `EXISTS`, `IN (SELECT ...)`, `(SELECT ...)` | `EXISTS`, `IN (SELECT ...)`, `(SELECT ...)` | `EXISTS`, `IN (SELECT ...)`, `(SELECT ...)` | Escopo pai encadeado + alias implícito (validado vs SQLite) |
+| Funções de janela | `NUMERO_LINHA()`, `CLASSIFICACAO()`, `CLASSIFICACAO_DENSA()`, `ANTERIOR(x)`, `PROXIMO(x)`, `SOMA(x)` com `SOBRE ([PARTICIONAR POR ...] [ORDENAR POR ...])` | `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`, `SUM OVER (...)` | Traduzido + validado PG 17 | Traduzido + validado MariaDB 11.8.8 | Particionamento e ordenação por janela (validado vs SQLite) |

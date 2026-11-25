@@ -10,19 +10,25 @@ classe ContextoLinha {
     valores: Val.Valor[]
     parametrosPosicionais: Val.Valor[]
     parametrosNomeados: dicionario
+    escopoPai: qualquer
+    executorSubconsulta: qualquer
 
     construtor(
         nomesColunas: texto[],
         tabelasColunas: texto[],
         valores: Val.Valor[],
         parametrosPosicionais: Val.Valor[] = [],
-        parametrosNomeados: dicionario = {}
+        parametrosNomeados: dicionario = {},
+        escopoPai: qualquer = nulo,
+        executorSubconsulta: qualquer = nulo
     ) {
         isto.nomesColunas = nomesColunas
         isto.tabelasColunas = tabelasColunas
         isto.valores = valores
         isto.parametrosPosicionais = parametrosPosicionais
         isto.parametrosNomeados = parametrosNomeados
+        isto.escopoPai = escopoPai
+        isto.executorSubconsulta = executorSubconsulta
     }
 
     buscarColuna(tabelaRef: texto, nomeCol: texto): Val.Valor {
@@ -34,6 +40,9 @@ classe ContextoLinha {
                     retorna isto.valores[i]
                 }
             }
+        }
+        se (isto.escopoPai != nulo) {
+            retorna isto.escopoPai.buscarColuna(tabelaRef, nomeCol)
         }
         falhar "Coluna '${nomeCol}' não encontrada no contexto da consulta."
     }
@@ -223,6 +232,49 @@ funcao avaliarExpressao(expr: Ast.Expressao, ctx: ContextoLinha): Val.Valor {
 
         caso Ast.TipoExpressao.Chamada:
             retorna avaliarFuncaoEscalar(expr.nome, expr.argumentos, ctx)
+
+        caso Ast.TipoExpressao.Subconsulta:
+            se (ctx.executorSubconsulta == nulo) {
+                falhar "Executor de subconsulta não disponível neste contexto."
+            }
+            var resSub: qualquer = ctx.executorSubconsulta.executarSubconsulta(expr.subconsulta, ctx)
+            se (resSub.linhas.tamanho() == 0) {
+                retorna Val.Valor.nuloVal()
+            }
+            se (resSub.linhas.tamanho() > 1) {
+                falhar "Subconsulta escalar retornou mais de uma linha (${resSub.linhas.tamanho()})."
+            }
+            retorna resSub.linhas[0][0]
+
+        caso Ast.TipoExpressao.Existe:
+            se (ctx.executorSubconsulta == nulo) {
+                falhar "Executor de subconsulta não disponível para EXISTE."
+            }
+            var resEx: qualquer = ctx.executorSubconsulta.executarSubconsulta(expr.subconsulta, ctx)
+            var temLinha: logico = resEx.linhas.tamanho() > 0
+            retorna Val.Valor.deLogico(expr.negado ? !temLinha : temLinha)
+
+        caso Ast.TipoExpressao.EmSubconsulta:
+            se (ctx.executorSubconsulta == nulo) {
+                falhar "Executor de subconsulta não disponível para EM (subconsulta)."
+            }
+            var vAlvoSub: Val.Valor = avaliarExpressao(expr.esquerda, ctx)
+            se (vAlvoSub.ehNulo()) { retorna Val.Valor.nuloVal() }
+            var resEm: qualquer = ctx.executorSubconsulta.executarSubconsulta(expr.subconsulta, ctx)
+            var achouSub: logico = falso
+            var temNuloSub: logico = falso
+            para (var si: inteiro = 0; si < resEm.linhas.tamanho(); si = si + 1) {
+                var itemSub: Val.Valor = resEm.linhas[si][0]
+                se (itemSub.ehNulo()) {
+                    temNuloSub = verdadeiro
+                } senao se (Val.compararTotal(vAlvoSub, itemSub) == 0) {
+                    achouSub = verdadeiro
+                    sustar
+                }
+            }
+            se (achouSub) { retorna Val.Valor.deLogico(!expr.negado) }
+            se (temNuloSub) { retorna Val.Valor.nuloVal() }
+            retorna Val.Valor.deLogico(expr.negado)
     }
     retorna Val.Valor.nuloVal()
 }

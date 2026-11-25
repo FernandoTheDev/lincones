@@ -1,0 +1,120 @@
+importar sintatico.parser como Par
+importar traducao.sqlite.tradutor como TradSql
+importar traducao.postgresql.tradutor como TradPg
+importar traducao.mysql.tradutor como TradMy
+importar conectores.sqlite_conector como ConnSql
+importar execucao.motor_proprio como Motor
+
+funcao afirmar(condicao: logico, msg: texto): vazio {
+    se (!condicao) {
+        falhar "FALHA RELACIONAL AVANCADO: " + msg
+    }
+}
+
+// 1. Validar tradução SQL nos 3 dialetos
+const qCte: texto = "COM vendas_altas COMO (SELECIONAR cliente_id, valor DE pedidos ONDE valor >= 100) SELECIONAR cliente_id, valor DE vendas_altas ORDENAR POR valor DECRESCENTE;"
+var pCte = Par.AnalisadorSintatico.analisarCodigo(qCte, "", falso)
+afirmar(TradSql.TradutorSQLite().traduzir(pCte.comandos[0]).sql.inclui("WITH vendas_altas AS (SELECT"), "SQLite CTE incorreto")
+afirmar(TradPg.TradutorPostgreSQL().traduzir(pCte.comandos[0]).sql.inclui("WITH vendas_altas AS (SELECT"), "PG CTE incorreto")
+afirmar(TradMy.TradutorMySQL().traduzir(pCte.comandos[0]).sql.inclui("WITH vendas_altas AS (SELECT"), "MySQL CTE incorreto")
+
+const qSub: texto = "SELECIONAR c.nome, (SELECIONAR CONTAR(*) DE pedidos p ONDE p.cliente_id = c.id) COMO qtd DE clientes c ONDE EXISTE (SELECIONAR 1 DE pedidos p2 ONDE p2.cliente_id = c.id E p2.valor >= 100) ORDENAR POR c.id CRESCENTE;"
+var pSub = Par.AnalisadorSintatico.analisarCodigo(qSub, "", falso)
+var sqlSub = TradSql.TradutorSQLite().traduzir(pSub.comandos[0]).sql
+afirmar(sqlSub.inclui("EXISTS (SELECT 1 FROM pedidos"), "SQLite EXISTS incorreto: " + sqlSub)
+
+const qWin: texto = "SELECIONAR cliente_id, valor, NUMERO_LINHA() SOBRE (PARTICIONAR POR cliente_id ORDENAR POR valor DECRESCENTE) COMO rn, CLASSIFICACAO() SOBRE (PARTICIONAR POR cliente_id ORDENAR POR valor DECRESCENTE) COMO rk, CLASSIFICACAO_DENSA() SOBRE (PARTICIONAR POR cliente_id ORDENAR POR valor DECRESCENTE) COMO drk, ANTERIOR(valor) SOBRE (PARTICIONAR POR cliente_id ORDENAR POR valor CRESCENTE) COMO prev_v, PROXIMO(valor) SOBRE (PARTICIONAR POR cliente_id ORDENAR POR valor CRESCENTE) COMO next_v, SOMA(valor) SOBRE (PARTICIONAR POR cliente_id) COMO total_cli DE pedidos ORDENAR POR cliente_id CRESCENTE, valor CRESCENTE;"
+var pWin = Par.AnalisadorSintatico.analisarCodigo(qWin, "", falso)
+var sqlWin = TradSql.TradutorSQLite().traduzir(pWin.comandos[0]).sql
+afirmar(sqlWin.inclui("ROW_NUMBER() OVER (PARTITION BY") e sqlWin.inclui("DENSE_RANK() OVER") e sqlWin.inclui("LAG(valor) OVER") e sqlWin.inclui("LEAD(valor) OVER"), "SQLite Window incorreto: " + sqlWin)
+
+// 2. Preparar mesmo dataset no MotorProprio e no SQLite real (comparação diferencial)
+var db = Motor.MotorProprio(":memoria:", 64, falso, falso)
+db.abrir()
+var sq = ConnSql.ConectorSQLite(":memory:")
+
+const ddlClientes: texto = "CRIAR TABELA clientes (id INTEIRO CHAVE PRIMARIA, nome TEXTO(60));"
+const ddlPedidos: texto = "CRIAR TABELA pedidos (id INTEIRO CHAVE PRIMARIA, cliente_id INTEIRO, valor INTEIRO);"
+db.executar(ddlClientes)
+db.executar(ddlPedidos)
+sq.executarLinConEs(ddlClientes)
+sq.executarLinConEs(ddlPedidos)
+
+var clientesDados = [
+    [1, "Ana"],
+    [2, "Bruno"],
+    [3, "Carla"]
+]
+para (var i: inteiro = 0; i < clientesDados.tamanho(); i = i + 1) {
+    db.executar("INSERIR EM clientes (id, nome) VALORES (?, ?);", clientesDados[i])
+    sq.executarLinConEs("INSERIR EM clientes (id, nome) VALORES (?, ?);", clientesDados[i])
+}
+
+var pedidosDados = [
+    [10, 1, 100],
+    [11, 1, 200],
+    [12, 1, 200],
+    [13, 2, 50],
+    [14, 2, 150]
+]
+para (var j: inteiro = 0; j < pedidosDados.tamanho(); j = j + 1) {
+    db.executar("INSERIR EM pedidos (id, cliente_id, valor) VALORES (?, ?, ?);", pedidosDados[j])
+    sq.executarLinConEs("INSERIR EM pedidos (id, cliente_id, valor) VALORES (?, ?, ?);", pedidosDados[j])
+}
+
+// 3. Validar CTE simples e encadeada (MotorProprio vs SQLite)
+var rCteDb = db.executar(qCte)
+var rCteSq = sq.executarLinConEs(qCte)
+afirmar(rCteDb.linhas.tamanho() == rCteSq.linhas.tamanho() e rCteDb.linhas.tamanho() == 4, "CTE contagem divergiu: " + texto(rCteDb.linhas.tamanho()))
+para (var k: inteiro = 0; k < rCteDb.linhas.tamanho(); k = k + 1) {
+    afirmar(rCteDb.linhas[k][1].inteiroVal == inteiro(rCteSq.linhas[k]["valor"]), "CTE valor divergiu na linha " + texto(k))
+}
+
+const qCteEnc: texto = "COM p1 COMO (SELECIONAR cliente_id, valor DE pedidos ONDE valor >= 100), p2 COMO (SELECIONAR cliente_id, SOMA(valor) COMO total DE p1 AGRUPAR POR cliente_id) SELECIONAR cliente_id, total DE p2 ORDENAR POR cliente_id CRESCENTE;"
+var rEncDb = db.executar(qCteEnc)
+var rEncSq = sq.executarLinConEs(qCteEnc)
+afirmar(rEncDb.linhas.tamanho() == 2 e rEncSq.linhas.tamanho() == 2, "CTE encadeada contagem incorreta")
+afirmar(inteiro(rEncDb.linhas[0][1].comoReal()) == 500 e inteiro(rEncSq.linhas[0]["total"]) == 500, "CTE encadeada Ana deve ser 500, obtido " + rEncDb.linhas[0][1].paraTexto())
+afirmar(inteiro(rEncDb.linhas[1][1].comoReal()) == 150 e inteiro(rEncSq.linhas[1]["total"]) == 150, "CTE encadeada Bruno deve ser 150, obtido " + rEncDb.linhas[1][1].paraTexto())
+
+// 4. Validar Subconsultas Correlacionadas (EXISTE, escalar e EM)
+var rSubDb = db.executar(qSub)
+var rSubSq = sq.executarLinConEs(qSub)
+afirmar(rSubDb.linhas.tamanho() == 2 e rSubSq.linhas.tamanho() == 2, "Subconsulta EXISTE deve retornar 2 clientes (Ana e Bruno)")
+afirmar(rSubDb.linhas[0][0].textoVal == "Ana" e rSubDb.linhas[0][1].inteiroVal == 3, "Ana deve ter 3 pedidos")
+afirmar(rSubDb.linhas[1][0].textoVal == "Bruno" e rSubDb.linhas[1][1].inteiroVal == 2, "Bruno deve ter 2 pedidos")
+
+const qInSub: texto = "SELECIONAR nome DE clientes ONDE id EM (SELECIONAR cliente_id DE pedidos ONDE valor >= 200) ORDENAR POR nome CRESCENTE;"
+var rInDb = db.executar(qInSub)
+var rInSq = sq.executarLinConEs(qInSub)
+afirmar(rInDb.linhas.tamanho() == 1 e rInSq.linhas.tamanho() == 1, "EM (subconsulta) deve retornar 1 cliente")
+afirmar(rInDb.linhas[0][0].textoVal == "Ana", "EM (subconsulta) deve retornar Ana")
+
+const qNaoExiste: texto = "SELECIONAR nome DE clientes c ONDE NAO EXISTE (SELECIONAR 1 DE pedidos p ONDE p.cliente_id = c.id);"
+var rNeDb = db.executar(qNaoExiste)
+var rNeSq = sq.executarLinConEs(qNaoExiste)
+afirmar(rNeDb.linhas.tamanho() == 1 e rNeSq.linhas.tamanho() == 1, "NAO EXISTE deve retornar 1 cliente (Carla)")
+afirmar(rNeDb.linhas[0][0].textoVal == "Carla", "NAO EXISTE deve retornar Carla")
+
+// 5. Validar Funções de Janela (ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, SUM OVER) vs SQLite
+var rWinDb = db.executar(qWin)
+var rWinSq = sq.executarLinConEs(qWin)
+afirmar(rWinDb.linhas.tamanho() == rWinSq.linhas.tamanho() e rWinDb.linhas.tamanho() == 5, "Window deve retornar 5 linhas")
+para (var w: inteiro = 0; w < rWinDb.linhas.tamanho(); w = w + 1) {
+    var rowDb = rWinDb.linhas[w]
+    var rowSq = rWinSq.linhas[w]
+    afirmar(rowDb[0].inteiroVal == inteiro(rowSq["cliente_id"]), "Win cliente_id divergiu na linha " + texto(w))
+    afirmar(rowDb[1].inteiroVal == inteiro(rowSq["valor"]), "Win valor divergiu na linha " + texto(w))
+    afirmar(rowDb[2].inteiroVal == inteiro(rowSq["rn"]), "Win rn divergiu na linha " + texto(w))
+    afirmar(rowDb[3].inteiroVal == inteiro(rowSq["rk"]), "Win rk divergiu na linha " + texto(w))
+    afirmar(rowDb[4].inteiroVal == inteiro(rowSq["drk"]), "Win drk divergiu na linha " + texto(w))
+    afirmar(inteiro(rowDb[7].comoReal()) == inteiro(rowSq["total_cli"]), "Win total_cli divergiu na linha " + texto(w))
+}
+// Conferir empates de RANK e DENSE_RANK para cliente 1 (valores: 100, 200, 200 -> ordem DESC: 200(rk=1,drk=1), 200(rk=1,drk=1), 100(rk=3,drk=2))
+afirmar(rWinDb.linhas[0][1].inteiroVal == 100 e rWinDb.linhas[0][3].inteiroVal == 3 e rWinDb.linhas[0][4].inteiroVal == 2, "RANK/DENSE_RANK empate incorreto para valor 100")
+// Conferir LAG/LEAD na partição 1 (100, 200, 200): linha 0 prev=NULO, next=200
+afirmar(rWinDb.linhas[0][5].ehNulo() e rWinDb.linhas[0][6].inteiroVal == 200, "LAG/LEAD incorreto na linha 0")
+
+db.fechar()
+sq.fechar()
+escreva("relacional_avancado_teste: OK")

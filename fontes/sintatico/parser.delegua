@@ -165,6 +165,7 @@ classe AnalisadorSintatico {
             caso Tok.TipoToken.Alterar: retorna isto.analisarAlterar()
             caso Tok.TipoToken.Remover: retorna isto.analisarRemover()
             caso Tok.TipoToken.Inserir: retorna isto.analisarInserir()
+            caso Tok.TipoToken.Com: retorna isto.analisarComCte()
             caso Tok.TipoToken.Selecionar: retorna isto.analisarSelecionar()
             caso Tok.TipoToken.Atualizar: retorna isto.analisarAtualizar()
             caso Tok.TipoToken.Excluir: retorna isto.analisarExcluir()
@@ -532,6 +533,25 @@ classe AnalisadorSintatico {
         retorna cmd
     }
 
+    analisarComCte(): Ast.Comando {
+        isto.avancar() // consome COM
+        var ctes: Ast.DefinicaoCte[] = []
+        enquanto (!isto.fim()) {
+            var nomeCte: texto = isto.esperarIdentificador("nome da CTE")
+            isto.esperar(Tok.TipoToken.Como, "Esperado 'COMO' na definição da CTE '${nomeCte}'.")
+            isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' na definição da CTE '${nomeCte}'.")
+            var consultaCte: Ast.Comando = isto.analisarSelecionar()
+            isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após consulta da CTE '${nomeCte}'.")
+            ctes.adicionar(Ast.DefinicaoCte(nomeCte, consultaCte))
+            se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                sustar
+            }
+        }
+        var cmdFinal: Ast.Comando = isto.analisarSelecionar()
+        cmdFinal.ctes = ctes
+        retorna cmdFinal
+    }
+
     analisarSelecionar(): Ast.Comando {
         var tokIni: Tok.Token = isto.avancar() // consome SELECIONAR
         var cmd = Ast.Comando(Ast.TipoComando.Selecionar, tokIni.intervalo)
@@ -560,6 +580,8 @@ classe AnalisadorSintatico {
             cmd.tabela = isto.esperarIdentificador("nome da tabela")
             se (!isto.modoEstrito e isto.combinar(Tok.TipoToken.Como)) {
                 cmd.apelidoTabela = isto.esperarIdentificador("apelido da tabela")
+            } senao se (!isto.modoEstrito e isto.verificar(Tok.TipoToken.Identificador)) {
+                cmd.apelidoTabela = isto.avancar().lexema
             }
         }
 
@@ -603,6 +625,8 @@ classe AnalisadorSintatico {
             var apJ: texto = ""
             se (isto.combinar(Tok.TipoToken.Como)) {
                 apJ = isto.esperarIdentificador("apelido da tabela na junção")
+            } senao se (isto.verificar(Tok.TipoToken.Identificador)) {
+                apJ = isto.avancar().lexema
             }
             var condJ: qualquer = nulo
             se (tipoJ != Ast.TipoJuncao.Cruzada) {
@@ -818,6 +842,11 @@ classe AnalisadorSintatico {
         }
         se (isto.combinar(Tok.TipoToken.Em)) {
             isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' após 'EM'.")
+            se (isto.verificar(Tok.TipoToken.Selecionar) ou isto.verificar(Tok.TipoToken.Com)) {
+                var subEm: Ast.Comando = isto.verificar(Tok.TipoToken.Com) ? isto.analisarComCte() : isto.analisarSelecionar()
+                isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após subconsulta de 'EM'.")
+                retorna Ast.Expressao.deEmSubconsulta(esq, subEm, negOp, esq.intervalo)
+            }
             var lista: Ast.Expressao[] = []
             enquanto (!isto.fim() e !isto.verificar(Tok.TipoToken.ParenteseDir)) {
                 lista.adicionar(isto.analisarExpressao())
@@ -919,8 +948,19 @@ classe AnalisadorSintatico {
                 var nomeParam: texto = isto.esperarIdentificador("nome do parâmetro")
                 isto.contadorParametros = isto.contadorParametros + 1
                 retorna Ast.Expressao.parametro(nomeParam, isto.contadorParametros, t.intervalo)
+            caso Tok.TipoToken.Existe:
+                isto.avancar()
+                isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' após 'EXISTE'.")
+                var subEx: Ast.Comando = isto.verificar(Tok.TipoToken.Com) ? isto.analisarComCte() : isto.analisarSelecionar()
+                isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após subconsulta de 'EXISTE'.")
+                retorna Ast.Expressao.deExiste(subEx, falso, t.intervalo)
             caso Tok.TipoToken.ParenteseEsq:
                 isto.avancar()
+                se (isto.verificar(Tok.TipoToken.Selecionar) ou isto.verificar(Tok.TipoToken.Com)) {
+                    var subEsc: Ast.Comando = isto.verificar(Tok.TipoToken.Com) ? isto.analisarComCte() : isto.analisarSelecionar()
+                    isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' para fechar subconsulta.")
+                    retorna Ast.Expressao.deSubconsulta(subEsc, t.intervalo)
+                }
                 var interna: Ast.Expressao = isto.analisarExpressao()
                 isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' para fechar expressão.")
                 retorna interna
@@ -942,7 +982,36 @@ classe AnalisadorSintatico {
                             }
                         }
                         isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após argumentos de '${t.lexema}'.")
-                        retorna Ast.Expressao.chamada(t.lexema.maiusculo(), args, dist, t.intervalo)
+                        var chamadaExpr: Ast.Expressao = Ast.Expressao.chamada(t.lexema.maiusculo(), args, dist, t.intervalo)
+                        // Cláusula de janela: SOBRE ([PARTICIONAR POR ...] [ORDENAR POR ...])
+                        se (!isto.modoEstrito e isto.combinar(Tok.TipoToken.Sobre)) {
+                            isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' após 'SOBRE'.")
+                            var jan = Ast.EspecificacaoJanela()
+                            se (isto.combinar(Tok.TipoToken.Particionar)) {
+                                isto.esperar(Tok.TipoToken.Por, "Esperado 'POR' após 'PARTICIONAR'.")
+                                enquanto (!isto.fim() e !isto.verificar(Tok.TipoToken.Ordenar) e !isto.verificar(Tok.TipoToken.ParenteseDir)) {
+                                    jan.particionarPor.adicionar(isto.analisarExpressao())
+                                    se (!isto.combinar(Tok.TipoToken.Virgula)) { sustar }
+                                }
+                            }
+                            se (isto.combinar(Tok.TipoToken.Ordenar)) {
+                                isto.esperar(Tok.TipoToken.Por, "Esperado 'POR' após 'ORDENAR' em SOBRE.")
+                                enquanto (!isto.fim() e !isto.verificar(Tok.TipoToken.ParenteseDir)) {
+                                    var eOrdJ: Ast.Expressao = isto.analisarExpressao()
+                                    var descJ: logico = falso
+                                    se (isto.combinar(Tok.TipoToken.Decrescente)) {
+                                        descJ = verdadeiro
+                                    } senao {
+                                        isto.combinar(Tok.TipoToken.Crescente)
+                                    }
+                                    jan.ordenarPor.adicionar(Ast.ItemOrdenacao(eOrdJ, descJ))
+                                    se (!isto.combinar(Tok.TipoToken.Virgula)) { sustar }
+                                }
+                            }
+                            isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' ao finalizar cláusula SOBRE.")
+                            chamadaExpr.janela = jan
+                        }
+                        retorna chamadaExpr
                     }
                     // Referência qualificada: tabela.coluna ou tabela.*
                     se (isto.combinar(Tok.TipoToken.PontoSimbolo)) {

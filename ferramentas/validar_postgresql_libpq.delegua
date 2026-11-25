@@ -1,0 +1,49 @@
+// Ferramenta de validação ao vivo do ConectorPostgreSQL (libpq) contra instância PostgreSQL isolada.
+// Compilar com: ~/cgd/cgd ferramentas/validar_postgresql_libpq.delegua --recurso postgresql -s /tmp/validar_postgresql_libpq
+importar conectores.postgresql_conector como ConnPg
+
+funcao afirmar(cond: logico, msg: texto): vazio {
+    se (!cond) {
+        falhar "FALHA POSTGRESQL VIVO: " + msg
+    }
+}
+
+var conn = ConnPg.ConectorPostgreSQL()
+var ver: inteiro = conn.versaoLibPQ()
+afirmar(ver > 0, "Versão libpq inválida: " + texto(ver))
+escreva("libpq ligada nativamente, PQlibVersion=" + texto(ver))
+
+// 1. Conectar ao PostgreSQL 17 isolado na porta 55432
+conn.conectar("host=127.0.0.1 port=55432 user=postgres password=lincones_test dbname=lincones_teste connect_timeout=3")
+
+// 2. DDL + DML via LinConEs traduzido
+conn.executarLinConEs("REMOVER TABELA SE EXISTIR itens_pg;")
+conn.executarLinConEs("CRIAR TABELA itens_pg (id INTEIRO NAO NULO CHAVE PRIMARIA AUTO INCREMENTO, nome TEXTO(80) NAO NULO, valor INTEIRO NAO NULO);")
+conn.executarLinConEs("INSERIR EM itens_pg (nome, valor) VALORES ('Alpha', 100);")
+conn.executarLinConEs("INSERIR EM itens_pg (nome, valor) VALORES ('Beta', 250);")
+
+// 3. Transação + Rollback real no servidor PostgreSQL
+conn.executarSql("BEGIN")
+conn.executarLinConEs("INSERIR EM itens_pg (nome, valor) VALORES ('Descartado', 999);")
+conn.executarSql("ROLLBACK")
+
+var rSel = conn.executarLinConEs("SELECIONAR id, nome, valor DE itens_pg ORDENAR POR id CRESCENTE;")
+afirmar(rSel.linhas.tamanho() == 2, "Esperadas 2 linhas após rollback, obtido " + texto(rSel.linhas.tamanho()))
+afirmar(texto(rSel.linhas[0]["nome"]) == "Alpha" e texto(rSel.linhas[1]["nome"]) == "Beta", "Valores lidos do PostgreSQL incorretos")
+
+// 4. CTE + Window Function traduzidas e executadas no PostgreSQL 17
+var rCte = conn.executarLinConEs("COM altos COMO (SELECIONAR nome, valor DE itens_pg ONDE valor >= 100) SELECIONAR nome, valor, NUMERO_LINHA() SOBRE (ORDENAR POR valor DECRESCENTE) COMO rn DE altos;")
+afirmar(rCte.linhas.tamanho() == 2, "CTE+Window no PostgreSQL deveria retornar 2 linhas")
+afirmar(texto(rCte.linhas[0]["nome"]) == "Beta" e texto(rCte.linhas[0]["rn"]) == "1", "Ranking Window no PostgreSQL divergiu")
+
+// 5. Tratamento controlado de erro SQL
+var pegouErro: logico = falso
+tente {
+    conn.executarLinConEs("SELECIONAR x DE tabela_inexistente_pg;")
+} pegue (err) {
+    pegouErro = verdadeiro
+}
+afirmar(pegouErro, "Erro SQL no PostgreSQL deveria lançar exceção controlada")
+
+conn.fechar()
+escreva("validar_postgresql_vivo: OK")

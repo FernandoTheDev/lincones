@@ -147,6 +147,10 @@ funcao classificarPalavraChave(lexemaMinusculo: texto, modoEstrito: logico): Tok
         caso "senao": retorna Tok.TipoToken.Senao
         caso "senão": retorna Tok.TipoToken.Senao
         caso "fim": retorna Tok.TipoToken.Fim
+        caso "com": retorna Tok.TipoToken.Com
+        caso "existe": retorna Tok.TipoToken.Existe
+        caso "sobre": retorna Tok.TipoToken.Sobre
+        caso "particionar": retorna Tok.TipoToken.Particionar
     }
     retorna Tok.TipoToken.Identificador
 }

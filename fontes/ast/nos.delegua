@@ -13,7 +13,10 @@ enum TipoExpressao {
     EhNulo,
     Entre,
     EmLista,
-    Asterisco
+    Asterisco,
+    Subconsulta,
+    Existe,
+    EmSubconsulta
 }
 
 enum TipoComando {
@@ -75,6 +78,8 @@ classe Expressao {
     terceiro: qualquer
     argumentos: Expressao[]
     distinto: logico
+    subconsulta: qualquer
+    janela: qualquer
 
     construtor(tipoExpr: TipoExpressao, intervalo: Diag.Intervalo) {
         isto.tipoExpr = tipoExpr
@@ -90,6 +95,8 @@ classe Expressao {
         isto.terceiro = nulo
         isto.argumentos = []
         isto.distinto = falso
+        isto.subconsulta = nulo
+        isto.janela = nulo
     }
 
     estatico literal(v: Val.Valor, intervalo: Diag.Intervalo): Expressao {
@@ -163,6 +170,47 @@ classe Expressao {
         var expr = Expressao(TipoExpressao.Asterisco, intervalo)
         expr.tabelaRef = tabelaRef
         retorna expr
+    }
+
+    estatico deSubconsulta(cmd: qualquer, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.Subconsulta, intervalo)
+        expr.subconsulta = cmd
+        retorna expr
+    }
+
+    estatico deExiste(cmd: qualquer, negado: logico, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.Existe, intervalo)
+        expr.subconsulta = cmd
+        expr.negado = negado
+        retorna expr
+    }
+
+    estatico deEmSubconsulta(alvo: Expressao, cmd: qualquer, negado: logico, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.EmSubconsulta, intervalo)
+        expr.esquerda = alvo
+        expr.subconsulta = cmd
+        expr.negado = negado
+        retorna expr
+    }
+}
+
+classe EspecificacaoJanela {
+    particionarPor: Expressao[]
+    ordenarPor: ItemOrdenacao[]
+
+    construtor() {
+        isto.particionarPor = []
+        isto.ordenarPor = []
+    }
+}
+
+classe DefinicaoCte {
+    nome: texto
+    consulta: qualquer
+
+    construtor(nome: texto, consulta: qualquer) {
+        isto.nome = nome
+        isto.consulta = consulta
     }
 }
 
@@ -290,6 +338,7 @@ classe Comando {
     linhasValores: qualquer[]
 
     // SELECIONAR
+    ctes: DefinicaoCte[]
     distinto: logico
     itensSelecao: ItemSelecao[]
     juncoes: ClausulaJuncao[]
@@ -327,6 +376,7 @@ classe Comando {
         isto.operacoesAlteracao = []
         isto.colunasNomes = []
         isto.linhasValores = []
+        isto.ctes = []
         isto.distinto = falso
         isto.itensSelecao = []
         isto.juncoes = []

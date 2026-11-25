@@ -1,47 +1,49 @@
-# Formato Binário do Arquivo `.lce` (Versão 1)
+# Formato Binário em Disco (`.lce` e `.lce-wal`) — LinConEs Nativo
 
-Todo arquivo `.lce` é organizado em **páginas de tamanho fixo de 4096 bytes**, em ordem de bytes **little-endian** explícita, sem gravação crua de estruturas de memória.
+## 1. Organização Geral das Páginas
 
-## 1. Página 0 — Cabeçalho do Banco
+- **Tamanho fixo de página**: `4096 bytes` (4 KiB), endianness **little-endian**.
+- **Integridade**: toda página contém checksum **CRC32** nos últimos 4 bytes (`offset 4092..4095`), validado na leitura.
+- **Cabeçalho comum de página**:
+  - `offset 0`: `u8 tipoPagina`
+    - `1` = Cabeçalho do banco (página 1)
+    - `2` = Página de dados (`SlottedPage`)
+    - `3` = Nó interno de Árvore B+
+    - `4` = Nó folha de Árvore B+
+    - `5` = Página livre (lista encadeada de páginas reutilizáveis)
+    - `6` = Catálogo do sistema
+    - `7` = **Página de Overflow** (registros > 3900 bytes)
 
-| Deslocamento | Tamanho | Tipo | Campo |
-| :--- | :--- | :--- | :--- |
-| `0` | 4 B | `u32 LE` | Assinatura mágica `LCE1` (`0x3145434C` = `826622796`) |
-| `4` | 4 B | `u32 LE` | Versão do formato (`1`) |
-| `8` | 4 B | `u32 LE` | Tamanho da página (`4096`) |
-| `12` | 4 B | `u32 LE` | Total de páginas alocadas no arquivo |
-| `16` | 4 B | `u32 LE` | Cabeça da lista de páginas livres (`0` = vazia) |
-| `20` | 4 B | `u32 LE` | ID da página raiz do catálogo (`1`) |
-| `24` | 4 B | `u32 LE` | Versão do esquema |
-| `28` | 4 B | `u32 LE` | Próximo `txId` |
-| `32` | 4 B | `u32 LE` | Flags de integridade (`0`) |
-| `36` | 4 B | `u32 LE` | CRC32 IEEE 802.3 dos bytes `[0..35]` |
+## 2. Cabeçalho do Banco (Página 1)
 
-## 2. Cabeçalho Comum das Páginas (`idPagina >= 1`)
+- `0..7`: Assinatura mágica `"LINCONES"` (8 bytes)
+- `8..11`: Versão do formato (`u32`, atual `1`)
+- `12..15`: Tamanho da página (`u32 = 4096`)
+- `16..19`: Total de páginas alocadas (`u32`)
+- `20..23`: Página raiz do catálogo (`u32`)
+- `24..27`: Cabeça da lista de páginas livres (`u32`, `0` = vazia)
+- `28..31`: Contador de geração / schema version (`u32`)
 
-| Deslocamento | Tamanho | Tipo | Campo |
-| :--- | :--- | :--- | :--- |
-| `0` | 1 B | `u8` | Tipo da página: `2=Dados`, `3=BTreeFolha`, `4=BTreeInterna`, `5=Livre`, `6=Catalogo`, `7=Overflow` |
-| `1` | 1 B | `u8` | Flags reservadas |
-| `2` | 2 B | `u16 LE` | Quantidade de slots ou entradas |
-| `4` | 2 B | `u16 LE` | Ponteiro de espaço livre inferior (`livreInicio`) |
-| `6` | 2 B | `u16 LE` | Ponteiro de espaço livre superior (`livreFim`) |
-| `8` | 4 B | `u32 LE` | Próxima página (encadeamento de dados, cadeia de folhas B+ Tree, ou `filho[0]` em nó interno) |
-| `12` | 4 B | `u32 LE` | CRC32 IEEE 802.3 calculado sobre `[0..11]` concatenado com `[16..4095]` |
+## 3. Páginas de Dados (`SlottedPage`, `tipo = 2`) e Páginas de Overflow (`tipo = 7`)
 
-## 3. Slotted Pages de Dados (`tipo = 2`)
+- Registros de até **3900 bytes** são armazenados integralmente *inline* dentro da `SlottedPage`.
+- Registros maiores que **3900 bytes** (testados até **1 MiB**, com suporte teórico até 16 MiB por campo de texto via prefixo `u32` na serialização de tuplas) utilizam **Páginas de Overflow encadeadas (`tipo = 7`)**:
+  - **Envelope inline na `SlottedPage` (12 bytes)**:
+    - `0..1`: Marcador `0xFFFF` (`u16`)
+    - `2..3`: Assinatura `'O'` (`0x4F`), `'V'` (`0x56`)
+    - `4..7`: `u32 tamanhoTotal` do registro serializado
+    - `8..11`: `u32 primeiraPaginaOverflow`
+  - **Layout da Página de Overflow (`tipo = 7`, 4096 bytes)**:
+    - `0`: `u8 tipo = 7`
+    - `1..3`: Reservado (`0`)
+    - `4..7`: `u32 proximaPagina` (`0` indica última página da cadeia)
+    - `8..11`: `u32 bytesUsados` (`0..4076`)
+    - `12..15`: `u32 indiceSequencia` (0, 1, 2, ... para detecção de ciclos/corrupção)
+    - `16..4091`: Carga útil (`4076 bytes` máximos por página)
+    - `4092..4095`: `u32 crc32`
+  - **Transacionalidade e reciclagem**: exclusões, atualizações (overflow → inline ou overflow → overflow) e `REVERTER` liberam todas as páginas da cadeia de overflow devolvendo-as à lista de páginas livres (`tipo = 5`), sendo reutilizadas nas próximas alocações.
 
-- Diretório de slots cresce a partir do byte `16`: cada slot ocupa 4 bytes (`offset: u16 LE`, `tamanho: u16 LE`).
-- Payloads de registros crescem do byte `4096` para baixo.
-- Slots excluídos têm `offset = 0` e `tamanho = 0`, preservando os `RID (idPagina, idSlot)` dos demais registros durante compactações.
-- Cada tupla serializada contém `numColunas (u16 LE)`, bitmap de nulidade (`ceil(numColunas / 8)` bytes) e valores tipados em formato explícito.
+## 4. Write-Ahead Log (`.lce-wal`)
 
-## 4. Páginas de Índice B+ Tree (`tipo = 3` e `tipo = 4`)
-
-- **Folha (`tipo = 3`):** `[8..11]` aponta para a próxima folha em ordem crescente; entradas sequenciais `[tamChave: u16 LE, chaveSerializada, ridCompacto: u64 LE]`.
-- **Interna (`tipo = 4`):** `[8..11]` armazena `filho[0]`; entradas sequenciais `[tamChave: u16 LE, chaveSerializada, filhoDireito: u32 LE]`.
-
-## 5. Arquivo WAL (`.lce-wal`)
-
-- Cabeçalho de 16 bytes: assinatura `WAL1` (`0x314C4157`), versão `1`, tamanho de página `4096`, CRC32 de `[0..11]`.
-- Sequência de quadros de 4116 bytes: `txId (u32)`, `tipoQuadro (u32: 1=Pagina, 2=Commit)`, `idPagina (u32)`, `totalPaginas (u32)`, `crc32Quadro (u32)` e imagem integral de `4096` bytes da página.
+- Arquivo complementar `<banco>.lce-wal` contendo quadros sequenciais com cabeçalho (número da página, tamanho, número da transação, flag de commit, CRC32) e imagem completa da página de 4 KiB.
+- Suporta `INICIAR TRANSACAO`, `CONFIRMAR`, `REVERTER`, `PONTO DE SALVAMENTO`, `REVERTER PARA` e recuperação automática após falha (redo de transações confirmadas, descarte de transações incompletas).

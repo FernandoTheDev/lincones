@@ -103,6 +103,10 @@ enum TipoToken {
     Entao,
     Senao,
     Fim,
+    Com,
+    Existe,
+    Sobre,
+    Particionar,
 
     // Símbolos e operadores
     ParenteseEsq,

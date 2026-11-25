@@ -88,7 +88,7 @@ funcao serializarTupla(valores: Val.Valor[]): Bin.Bytes {
                 out.anexarBytes(txtR)
             padrao:
                 var txtB: Bin.Bytes = Bin.Bytes.deTexto(v.textoVal)
-                out.anexarU16LE(txtB.tamanho())
+                out.anexarU32LE(txtB.tamanho())
                 out.anexarBytes(txtB)
         }
     }
@@ -146,8 +146,11 @@ funcao desserializarTupla(buf: Bin.Bytes, inicio: inteiro, comprimento: inteiro)
                 pos = pos + lenR
                 valores.adicionar(Val.Valor.deReal(real(sR)))
             padrao:
-                var lenT: inteiro = buf.lerU16LE(pos)
-                pos = pos + 2
+                var lenT: inteiro = buf.lerU32LE(pos)
+                pos = pos + 4
+                se (pos + lenT > limite) {
+                    falhar "Comprimento de texto/binário (${lenT}) excede o limite do registro."
+                }
                 var sT: texto = buf.fatiarTexto(pos, pos + lenT)
                 pos = pos + lenT
                 valores.adicionar(Val.Valor(td, 0, 0.0, falso, sT, 0))
@@ -255,7 +258,30 @@ funcao inserirNaPagina(buf: Bin.Bytes, payload: Bin.Bytes): inteiro {
     retorna idSlot
 }
 
-// Gerenciador de Heap de Tabela (cadeia de Slotted Pages encadeadas por proximaPagina).
+// Assinatura de envelope de overflow dentro de uma Slotted Page (12 bytes):
+//   [0..1] 0xFFFF (nunca é um numColunas válido)
+//   [2..3] 0x564F ('O','V')
+//   [4..7] tamanhoTotal (u32 LE)
+//   [8..11] primeiraPaginaOverflow (u32 LE)
+funcao limiteRegistroInline(): inteiro { retorna 3900 }
+funcao capacidadeFragmentoOverflow(): inteiro { retorna 4076 } // 4096 - 16 cabecalho - 4 bytesUsados
+funcao limiteMaximoRegistroOverflow(): inteiro { retorna 16777216 } // 16 MiB
+
+funcao ehEnvelopeOverflow(buf: Bin.Bytes, inicio: inteiro, comprimento: inteiro): logico {
+    se (comprimento != 12) { retorna falso }
+    retorna buf.lerU16LE(inicio) == 65535 e buf.lerU16LE(inicio + 2) == 22095
+}
+
+funcao criarEnvelopeOverflow(tamanhoTotal: inteiro, primeiraPagina: inteiro): Bin.Bytes {
+    var env: Bin.Bytes = Bin.Bytes.criarReservado(12)
+    env.anexarU16LE(65535)
+    env.anexarU16LE(22095)
+    env.anexarU32LE(tamanhoTotal)
+    env.anexarU32LE(primeiraPagina)
+    retorna env
+}
+
+// Gerenciador de Heap de Tabela (cadeia de Slotted Pages + suporte completo a Páginas de Overflow).
 classe ArmazenamentoTabela {
     pager: Pag.GerenciadorPaginas
 
@@ -263,12 +289,92 @@ classe ArmazenamentoTabela {
         isto.pager = pager
     }
 
-    inserirRegistro(paginaRaiz: inteiro, valores: Val.Valor[]): IdRegistro {
-        var payload: Bin.Bytes = serializarTupla(valores)
+    gravarCadeiaOverflow(payload: Bin.Bytes): inteiro {
+        var total: inteiro = payload.tamanho()
+        se (total > limiteMaximoRegistroOverflow()) {
+            falhar "Registro excede limite máximo de overflow (${total} > 16 MiB)."
+        }
+        var cap: inteiro = capacidadeFragmentoOverflow()
+        var primeiraPag: inteiro = 0
+        var pagAnterior: inteiro = 0
+        var offset: inteiro = 0
+
+        enquanto (offset < total) {
+            var pagId: inteiro = isto.pager.alocarPagina(Fmt.tipoPaginaOverflow())
+            se (primeiraPag == 0) {
+                primeiraPag = pagId
+            }
+            se (pagAnterior > 0) {
+                var bufAnt: Bin.Bytes = isto.pager.obterPagina(pagAnterior)
+                Fmt.escreverU32LE(bufAnt, 8, pagId)
+                Fmt.atualizarChecksumPagina(bufAnt)
+                isto.pager.marcarSuja(pagAnterior)
+            }
+            var restante: inteiro = total - offset
+            var bloco: inteiro = restante > cap ? cap : restante
+            var bufPag: Bin.Bytes = Bin.Bytes.criar(4096)
+            Fmt.inicializarPagina(bufPag, Fmt.tipoPaginaOverflow(), 0)
+            Fmt.escreverU32LE(bufPag, 16, bloco)
+            var i: inteiro = 0
+            enquanto (i < bloco) {
+                bufPag.definir(20 + i, payload.obter(offset + i))
+                i = i + 1
+            }
+            isto.pager.substituirConteudoPagina(pagId, bufPag)
+            offset = offset + bloco
+            pagAnterior = pagId
+        }
+        retorna primeiraPag
+    }
+
+    lerCadeiaOverflow(primeiraPag: inteiro, tamanhoEsperado: inteiro): Bin.Bytes {
+        se (tamanhoEsperado <= 0 ou tamanhoEsperado > limiteMaximoRegistroOverflow()) {
+            falhar "Comprimento de overflow inválido: ${tamanhoEsperado}."
+        }
+        var out: Bin.Bytes = Bin.Bytes.criarReservado(tamanhoEsperado)
+        var pagAtual: inteiro = primeiraPag
+        var paginasLidas: inteiro = 0
+        var maxPaginas: inteiro = (tamanhoEsperado \ capacidadeFragmentoOverflow()) + 4
+
+        enquanto (pagAtual > 0) {
+            paginasLidas = paginasLidas + 1
+            se (paginasLidas > maxPaginas) {
+                falhar "Cadeia de páginas de overflow cíclica ou excessivamente longa."
+            }
+            var buf: Bin.Bytes = isto.pager.obterPagina(pagAtual)
+            se (buf.obter(0) != Fmt.tipoPaginaOverflow()) {
+                falhar "Página ${pagAtual} referenciada em overflow não possui tipo Overflow."
+            }
+            var bloco: inteiro = Fmt.lerU32LE(buf, 16)
+            se (bloco <= 0 ou bloco > capacidadeFragmentoOverflow()) {
+                falhar "Comprimento de fragmento inválido (${bloco}) na página de overflow ${pagAtual}."
+            }
+            out.anexarBytesFatia(buf, 20, bloco)
+            pagAtual = Fmt.lerU32LE(buf, 8)
+        }
+        se (out.tamanho() != tamanhoEsperado) {
+            falhar "Cadeia de overflow truncada: esperado ${tamanhoEsperado} bytes, lido ${out.tamanho()}."
+        }
+        retorna out
+    }
+
+    liberarCadeiaOverflow(primeiraPag: inteiro): vazio {
+        var pagAtual: inteiro = primeiraPag
+        var passo: inteiro = 0
+        enquanto (pagAtual > 0 e passo < 8192) {
+            var buf: Bin.Bytes = isto.pager.obterPagina(pagAtual)
+            var prox: inteiro = Fmt.lerU32LE(buf, 8)
+            isto.pager.liberarPagina(pagAtual)
+            pagAtual = prox
+            passo = passo + 1
+        }
+    }
+
+    inserirPayloadBruto(paginaRaiz: inteiro, payloadSlot: Bin.Bytes): IdRegistro {
         var pagAtual: inteiro = paginaRaiz
         enquanto (verdadeiro) {
             var buf: Bin.Bytes = isto.pager.obterPagina(pagAtual)
-            var slot: inteiro = inserirNaPagina(buf, payload)
+            var slot: inteiro = inserirNaPagina(buf, payloadSlot)
             se (slot >= 0) {
                 isto.pager.marcarSuja(pagAtual)
                 retorna IdRegistro(pagAtual, slot)
@@ -276,7 +382,6 @@ classe ArmazenamentoTabela {
             var prox: inteiro = Fmt.lerU32LE(buf, 8)
             se (prox == 0) {
                 var novaPag: inteiro = isto.pager.alocarPagina(Fmt.tipoPaginaDados())
-                // Recarrega pagAtual caso tenha sido despejada pelo cache
                 var bufAtual: Bin.Bytes = isto.pager.obterPagina(pagAtual)
                 Fmt.escreverU32LE(bufAtual, 8, novaPag)
                 Fmt.atualizarChecksumPagina(bufAtual)
@@ -287,6 +392,26 @@ classe ArmazenamentoTabela {
             }
         }
         retorna IdRegistro(0, 0)
+    }
+
+    inserirRegistro(paginaRaiz: inteiro, valores: Val.Valor[]): IdRegistro {
+        var payload: Bin.Bytes = serializarTupla(valores)
+        se (payload.tamanho() > limiteRegistroInline()) {
+            var primOv: inteiro = isto.gravarCadeiaOverflow(payload)
+            var env: Bin.Bytes = criarEnvelopeOverflow(payload.tamanho(), primOv)
+            retorna isto.inserirPayloadBruto(paginaRaiz, env)
+        }
+        retorna isto.inserirPayloadBruto(paginaRaiz, payload)
+    }
+
+    decodificarSlot(buf: Bin.Bytes, off: inteiro, tam: inteiro): Val.Valor[] {
+        se (ehEnvelopeOverflow(buf, off, tam)) {
+            var tamTotal: inteiro = buf.lerU32LE(off + 4)
+            var primOv: inteiro = buf.lerU32LE(off + 8)
+            var reconstruido: Bin.Bytes = isto.lerCadeiaOverflow(primOv, tamTotal)
+            retorna desserializarTupla(reconstruido, 0, reconstruido.tamanho())
+        }
+        retorna desserializarTupla(buf, off, tam)
     }
 
     lerRegistro(rid: IdRegistro): qualquer {
@@ -301,7 +426,7 @@ classe ArmazenamentoTabela {
         se (tam == 0 ou off == 0) {
             retorna nulo
         }
-        retorna desserializarTupla(buf, off, tam)
+        retorna isto.decodificarSlot(buf, off, tam)
     }
 
     excluirRegistro(rid: IdRegistro): logico {
@@ -311,9 +436,15 @@ classe ArmazenamentoTabela {
             retorna falso
         }
         var posSlot: inteiro = 16 + rid.idSlot * 4
+        var off: inteiro = Fmt.lerU16LE(buf, posSlot)
         var tam: inteiro = Fmt.lerU16LE(buf, posSlot + 2)
         se (tam == 0) {
             retorna falso
+        }
+        se (ehEnvelopeOverflow(buf, off, tam)) {
+            var primOv: inteiro = buf.lerU32LE(off + 8)
+            isto.liberarCadeiaOverflow(primOv)
+            buf = isto.pager.obterPagina(rid.idPagina)
         }
         Fmt.escreverU16LE(buf, posSlot, 0)
         Fmt.escreverU16LE(buf, posSlot + 2, 0)
@@ -323,12 +454,22 @@ classe ArmazenamentoTabela {
     }
 
     atualizarRegistro(paginaRaiz: inteiro, rid: IdRegistro, novosValores: Val.Valor[]): IdRegistro {
-        var payload: Bin.Bytes = serializarTupla(novosValores)
+        var payloadBruto: Bin.Bytes = serializarTupla(novosValores)
+        var payload: Bin.Bytes = payloadBruto
+        se (payloadBruto.tamanho() > limiteRegistroInline()) {
+            var primOvNovo: inteiro = isto.gravarCadeiaOverflow(payloadBruto)
+            payload = criarEnvelopeOverflow(payloadBruto.tamanho(), primOvNovo)
+        }
         var buf: Bin.Bytes = isto.pager.obterPagina(rid.idPagina)
         var posSlot: inteiro = 16 + rid.idSlot * 4
         var offAtual: inteiro = Fmt.lerU16LE(buf, posSlot)
         var tamAtual: inteiro = Fmt.lerU16LE(buf, posSlot + 2)
-        // Se couber in-place, substitui mantendo o mesmo RID!
+        // Libera cadeia de overflow anterior, se houver
+        se (tamAtual > 0 e offAtual > 0 e ehEnvelopeOverflow(buf, offAtual, tamAtual)) {
+            var primOvAnt: inteiro = buf.lerU32LE(offAtual + 8)
+            isto.liberarCadeiaOverflow(primOvAnt)
+            buf = isto.pager.obterPagina(rid.idPagina)
+        }
         se (payload.tamanho() <= tamAtual e offAtual > 0) {
             var i: inteiro = 0
             enquanto (i < payload.tamanho()) {
@@ -340,7 +481,6 @@ classe ArmazenamentoTabela {
             isto.pager.marcarSuja(rid.idPagina)
             retorna rid
         }
-        // Caso contrário, libera o slot e tenta reinserir na mesma página após compactar; se não couber, realoca.
         Fmt.escreverU16LE(buf, posSlot, 0)
         Fmt.escreverU16LE(buf, posSlot + 2, 0)
         isto.pager.marcarSuja(rid.idPagina)
@@ -349,7 +489,7 @@ classe ArmazenamentoTabela {
             isto.pager.marcarSuja(rid.idPagina)
             retorna IdRegistro(rid.idPagina, novoSlot)
         }
-        retorna isto.inserirRegistro(paginaRaiz, novosValores)
+        retorna isto.inserirPayloadBruto(paginaRaiz, payload)
     }
 
     varrerTabela(paginaRaiz: inteiro): RegistroLido[] {
@@ -364,7 +504,7 @@ classe ArmazenamentoTabela {
                 var off: inteiro = Fmt.lerU16LE(buf, posSlot)
                 var tam: inteiro = Fmt.lerU16LE(buf, posSlot + 2)
                 se (tam > 0 e off > 0) {
-                    var vals: Val.Valor[] = desserializarTupla(buf, off, tam)
+                    var vals: Val.Valor[] = isto.decodificarSlot(buf, off, tam)
                     resultado.adicionar(RegistroLido(IdRegistro(pagAtual, s), vals))
                 }
             }

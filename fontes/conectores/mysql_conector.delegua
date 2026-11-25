@@ -3,13 +3,78 @@ modulo conectores.mysql_conector
 importar sintatico.parser como Par
 importar traducao.mysql.tradutor como TradMy
 
+// Integração opcional com libmariadb via compilação condicional (--recurso mysql).
+// Usa a resolução direta de soname versionado (:libmariadb.so.3) e cponteiro do CGD,
+// mantendo o binário principal do LinConEs sem dependência obrigatória de libmariadb.
+@quando(Compilacao.temRecurso("mysql"))
+@definicao(biblioteca = ":libmariadb.so.3", abi = "c")
+classe estrangeira LibMariaDB {
+    @definicao(simbolo = "mysql_init")
+    estatico iniciar(conn: cponteiro): cponteiro;
+    @definicao(simbolo = "mysql_real_connect")
+    estatico conectarReal(
+        conn: cponteiro,
+        host: texto,
+        usuario: texto,
+        senha: texto,
+        banco: texto,
+        porta: cu32,
+        socketUnix: texto,
+        flags: cu64
+    ): cponteiro;
+    @definicao(simbolo = "mysql_query")
+    estatico consultar(conn: cponteiro, sql: texto): cint;
+    @definicao(simbolo = "mysql_store_result")
+    estatico armazenarResultado(conn: cponteiro): cponteiro;
+    @definicao(simbolo = "mysql_num_rows")
+    estatico numLinhas(res: cponteiro): cu64;
+    @definicao(simbolo = "mysql_num_fields")
+    estatico numColunas(res: cponteiro): cu32;
+    @definicao(simbolo = "mysql_affected_rows")
+    estatico linhasAfetadas(conn: cponteiro): cu64;
+    @definicao(simbolo = "mysql_free_result")
+    estatico liberarResultado(res: cponteiro): vazio;
+    @definicao(simbolo = "mysql_error")
+    estatico mensagemErro(conn: cponteiro): texto;
+    @definicao(simbolo = "mysql_errno")
+    estatico codigoErro(conn: cponteiro): cu32;
+    @definicao(simbolo = "mysql_commit")
+    estatico confirmar(conn: cponteiro): cint;
+    @definicao(simbolo = "mysql_rollback")
+    estatico reverter(conn: cponteiro): cint;
+    @definicao(simbolo = "mysql_close")
+    estatico fechar(conn: cponteiro): vazio;
+    @definicao(simbolo = "mysql_get_server_info")
+    estatico versaoServidor(conn: cponteiro): texto;
+    @definicao(simbolo = "mysql_get_client_info")
+    estatico versaoCliente(): texto;
+}
+
+classe ResultadoMySQL {
+    sqlTraduzido: texto
+    linhasAfetadas: inteiro
+    numLinhas: inteiro
+    numColunas: inteiro
+
+    construtor(sqlTraduzido: texto, linhasAfetadas: inteiro = 0, numLinhas: inteiro = 0, numColunas: inteiro = 0) {
+        isto.sqlTraduzido = sqlTraduzido
+        isto.linhasAfetadas = linhasAfetadas
+        isto.numLinhas = numLinhas
+        isto.numColunas = numColunas
+    }
+}
+
 classe ConectorMySQL {
     tradutor: TradMy.TradutorMySQL
+    connHandle: inteiro
     aberto: logico
+    versaoRemota: texto
 
     construtor() {
         isto.tradutor = TradMy.TradutorMySQL(falso)
+        isto.connHandle = 0
         isto.aberto = falso
+        isto.versaoRemota = ""
     }
 
     traduzirLinConEs(codigo: texto): texto {
@@ -29,10 +94,92 @@ classe ConectorMySQL {
         retorna saida
     }
 
-    conectar(host: texto, porta: inteiro, usuario: texto, banco: texto): vazio {
-        falhar "Conector MySQL/MariaDB nativo requer biblioteca de desenvolvimento libmariadb/libmysqlclient habilitada."
+    @quando(Compilacao.temRecurso("mysql"))
+    conectar(host: texto, porta: inteiro, usuario: texto, senha: texto, banco: texto, socketUnix: texto = ""): vazio {
+        var h: inteiro = LibMariaDB.iniciar(0)
+        se (h == 0) {
+            falhar "Falha ao alocar handle libmariadb (mysql_init)."
+        }
+        var ok: inteiro = LibMariaDB.conectarReal(h, host, usuario, senha, banco, porta, socketUnix, 0)
+        se (ok == 0) {
+            var msg: texto = LibMariaDB.mensagemErro(h)
+            LibMariaDB.fechar(h)
+            falhar "Falha ao conectar ao MariaDB/MySQL (credenciais omitidas): " + msg
+        }
+        isto.connHandle = h
+        isto.aberto = verdadeiro
+        isto.versaoRemota = LibMariaDB.versaoServidor(h)
     }
 
+    @quando(!Compilacao.temRecurso("mysql"))
+    conectar(host: texto, porta: inteiro, usuario: texto, senha: texto, banco: texto, socketUnix: texto = ""): vazio {
+        falhar "Conector MariaDB/MySQL (libmariadb) não habilitado nesta compilação. Recompile com '--recurso mysql'."
+    }
+
+    @quando(Compilacao.temRecurso("mysql"))
+    executarSql(sql: texto): ResultadoMySQL {
+        se (!isto.aberto ou isto.connHandle == 0) {
+            falhar "Conexão MariaDB/MySQL não está aberta."
+        }
+        var rc: inteiro = LibMariaDB.consultar(isto.connHandle, sql)
+        se (rc != 0) {
+            var errMsg: texto = LibMariaDB.mensagemErro(isto.connHandle)
+            falhar "Erro MariaDB/MySQL (${LibMariaDB.codigoErro(isto.connHandle)}): " + errMsg
+        }
+        var resPtr: inteiro = LibMariaDB.armazenarResultado(isto.connHandle)
+        se (resPtr != 0) {
+            var nLin: inteiro = LibMariaDB.numLinhas(resPtr)
+            var nCol: inteiro = LibMariaDB.numColunas(resPtr)
+            LibMariaDB.liberarResultado(resPtr)
+            retorna ResultadoMySQL(sql, 0, nLin, nCol)
+        }
+        var afetadas: inteiro = LibMariaDB.linhasAfetadas(isto.connHandle)
+        retorna ResultadoMySQL(sql, afetadas, 0, 0)
+    }
+
+    @quando(!Compilacao.temRecurso("mysql"))
+    executarSql(sql: texto): ResultadoMySQL {
+        falhar "Conector MariaDB/MySQL não habilitado nesta compilação."
+    }
+
+    executarLinConEs(codigo: texto): ResultadoMySQL {
+        var parsed = Par.AnalisadorSintatico.analisarCodigo(codigo, "", falso)
+        se (parsed.diagnosticos.temErros()) {
+            falhar "Erro ao analisar LinConEs: " + parsed.diagnosticos.formatarTodos()
+        }
+        var ultimo: ResultadoMySQL = ResultadoMySQL("")
+        para (var i: inteiro = 0; i < parsed.comandos.tamanho(); i = i + 1) {
+            var trad = isto.tradutor.traduzir(parsed.comandos[i])
+            se (trad.temErros()) {
+                falhar "Erro na tradução MySQL: " + trad.diagnosticos.formatarTodos()
+            }
+            ultimo = isto.executarSql(trad.sql)
+        }
+        retorna ultimo
+    }
+
+    iniciarTransacao(): vazio {
+        isto.executarSql("START TRANSACTION")
+    }
+
+    confirmar(): vazio {
+        isto.executarSql("COMMIT")
+    }
+
+    reverter(): vazio {
+        isto.executarSql("ROLLBACK")
+    }
+
+    @quando(Compilacao.temRecurso("mysql"))
+    fechar(): vazio {
+        se (isto.aberto e isto.connHandle != 0) {
+            LibMariaDB.fechar(isto.connHandle)
+            isto.connHandle = 0
+            isto.aberto = falso
+        }
+    }
+
+    @quando(!Compilacao.temRecurso("mysql"))
     fechar(): vazio {
         isto.aberto = falso
     }

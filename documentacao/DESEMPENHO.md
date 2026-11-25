@@ -1,33 +1,24 @@
-# Desempenho e Telemetria do CGD-GC
+# Desempenho, Telemetria e Validação de Memória — LinConEs Nativo
 
-## 1. Metodologia
+## 1. Benchmark Comparativo Pós-Correção (`MotorProprio` vs `SQLite C`)
 
-- **Hardware / SO:** Linux x86_64.
-- **Compilador:** `~/cgd/cgd` (`CGD v0.10.0`, flags `--gc=cgd -o`).
-- **Benchmark reproduzível:** `desempenho/benchmark_lincones_vs_sqlite.delegua` comparando `MotorProprio` (`:memoria:`) vs `ConectorSQLite` (`:memory:` sobre `libsqlite3.so.3.51.2`) em condições equivalentes, com os mesmos comandos LinConEs e parâmetros vinculados.
+Executado via [benchmark_lincones_vs_sqlite.delegua](file:///home/fernandodev/lincones/desempenho/benchmark_lincones_vs_sqlite.delegua) compilado com `-o` (otimização máxima C99 do CGD) em modo `:memoria:` equivalente (1000 registros, 200 buscas pontuais por chave primária via Árvore B+, 1 varredura com agregação):
 
-## 2. Resultados Medidos (Escala: 1.000 registros)
+| Configuração | Inserção 1000 regs | 200 PK B+ Tree | Scan + Agregação | Ciclos GC | Liberados Determinísticos |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **LinConEs `MotorProprio` (`CGD-GC` padrão)** | 4340,29 ms | 22,45 ms | 4,83 ms | 11 | 4 |
+| **LinConEs `MotorProprio` (`Boehm` ref.)** | 4310,66 ms | 21,87 ms | 4,14 ms | 91 | 0 |
+| **SQLite C (`3.51.2` via `cgd:dados/sqlite`)** | 67,17 ms | 9,76 ms | 0,11 ms | — | — |
 
-| Operação | Motor Próprio (Antes) | Motor Próprio (Após Otimização) | SQLite C (Referência) | Razão (Próprio / SQLite) |
-| :--- | :--- | :--- | :--- | :--- |
-| Inserção em transação (1.000 linhas) | 4023.34 ms | 4160.56 ms | 67.25 ms | 61.9x |
-| 200 buscas por PK (B+ Tree) | 25.82 ms | **23.40 ms** | 12.09 ms | **1.93x** |
-| Varredura + Agregação (`CONTAR`, `SOMA`) | 4.56 ms | 4.65 ms | 0.18 ms | 25.8x |
-| Pico de Heap CGD-GC (`heapBytes`) | 59.38 MiB | **33.75 MiB (-43%)** | N/A | — |
-| Índices B+ Tree selecionados pelo otimizador | 200 / 200 | **200 / 200** | 200 / 200 | 100% |
+**Observações:**
+- O coletor padrão **`CGD-GC`** atingiu paridade de desempenho com o **`Boehm`** (< 1% de diferença), executando **8,3× menos ciclos de GC** (11 vs 91) e preservando liberações determinísticas híbridas.
+- O binário de produção `compilacao/lincones` tem **zero** dependência de `libgc`, `libsqlite3`, `libpq` ou `libmariadb`.
 
-## 3. Otimizações Automáticas do CGD-GC Confirmadas no Binário Final (`compilacao/lincones`)
+## 2. Estresse, Fuzzing 10× e Sanitizers
 
-Relatório completo salvo em `documentacao/relatorio_memoria_cgd.json` (`--relatorio-memoria-json`):
-
-- **Funções especializadas automaticamente (ANS):** `30` (incluindo `atualizarByteCrc32`, `potenciaDez`, `triE`, `triOu`, `triNao`, constantes de página e WAL).
-- **Chamadas diretas unboxed (ANS):** `53`.
-- **Objetos promovidos para stack local:** `2` (`parser:AnalisadorSintatico`, `leitor:LeitorJSON`).
-- **Coleções com liberação determinística em O(1):** `9` (`posRef`, `nomesVistos`, `vals`, `chavesGrupo`, `grupos`, `vistas`, `chavesOrd`, `descFlags`, `larguras`).
-- **Chamadas de método desvirtualizadas:** `403`.
-- **Dependência de `libgc`:** **Nenhuma** (confirmado via `ldd compilacao/lincones`).
-
-## 4. Gargalos Reais Identificados
-
-1. `ArmazenamentoTabela.inserirRegistro` percorre a cadeia de páginas desde `paginaRaizDados` e recalcula CRC32 de 4096 bytes por inserção — manter `ultimaPaginaDados` na `DefinicaoTabela` e CRC32 diferido até flush reduzirá drasticamente o tempo de inserção em lote.
-2. Conversão e re-parsing de consultas repetidas no benchmark (ausência de cache de planos preparados no `MotorProprio`).
+| Experimento | Escopo | Resultado |
+| :--- | :--- | :--- |
+| Caso reproduzível `cgd_gc_fuzz_pressao.delegua` | 6 perfis (`balanced`, `low_mem`, `throughput`, `low_latency`, `stress` [117.931 ciclos], `verify` [minor+major]) × GCC `-O2` e Clang `-O2` | **PASSOU (12/12)** |
+| Fuzzing intensificado 10× (`ferramentas/fuzz_intensivo_10x.delegua`) | 3 sementes × (4000 parses + 1500 ops MotorProprio) = 12.000 parses + 4.500 ops em `balanced`, `low_mem`, `verify`, `boehm` | **PASSOU (4/4)** |
+| **ASan + UBSan** + `CGD_GC_PROFILE=verify` | `cgd_gc_fuzz_pressao.delegua` e `overflow_e_ordenacao_externa_teste.delegua` (registros até 1 MiB + external sort em disco) | **PASSOU (0 erros)** |
+| Overflow Pages + External Sort | Persistência de registros 4001 B, 8 KiB, 64 KiB e **1 MiB** + ordenação externa forçada (orçamento 2 KiB sobre 120 linhas) | **PASSOU** |

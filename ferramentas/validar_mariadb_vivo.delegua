@@ -1,0 +1,46 @@
+// Ferramenta de validação ao vivo do ConectorMySQL (libmariadb.so.3) contra uma instância MariaDB isolada.
+// Compilar com: ~/cgd/cgd compilar ferramentas/validar_mariadb_vivo.delegua --recurso mysql -o /tmp/validar_mariadb_vivo
+importar conectores.mysql_conector como ConnMy
+
+funcao afirmar(cond: logico, msg: texto): vazio {
+    se (!cond) {
+        falhar "FALHA MARIADB VIVO: " + msg
+    }
+}
+
+var sock: texto = "/tmp/mariadb_lincones_test/mariadb.sock"
+
+var conn = ConnMy.ConectorMySQL()
+conn.conectar("localhost", 0, "root", "", "lincones_teste", sock)
+escreva("Conectado ao servidor MariaDB: " + conn.versaoRemota)
+
+// 1. DDL + DML via LinConEs traduzido
+conn.executarLinConEs("REMOVER TABELA SE EXISTIR itens_mariadb;")
+conn.executarLinConEs("CRIAR TABELA itens_mariadb (id INTEIRO NAO NULO CHAVE PRIMARIA AUTO INCREMENTO, nome TEXTO(80) NAO NULO, valor INTEIRO NAO NULO);")
+var rIns1 = conn.executarLinConEs("INSERIR EM itens_mariadb (nome, valor) VALORES ('Alpha', 100);")
+afirmar(rIns1.linhasAfetadas == 1, "Esperada 1 linha afetada no INSERT 1")
+conn.executarLinConEs("INSERIR EM itens_mariadb (nome, valor) VALORES ('Beta', 250);")
+
+// 2. Transação + Rollback real no servidor MariaDB
+conn.iniciarTransacao()
+conn.executarLinConEs("INSERIR EM itens_mariadb (nome, valor) VALORES ('Descartado', 999);")
+conn.reverter()
+
+var rSel = conn.executarLinConEs("SELECIONAR id, nome, valor DE itens_mariadb;")
+afirmar(rSel.numLinhas == 2 e rSel.numColunas == 3, "Esperadas 2 linhas x 3 colunas após rollback, obtido " + texto(rSel.numLinhas) + "x" + texto(rSel.numColunas))
+
+// 3. CTE + Window Function traduzidas e executadas no servidor MariaDB
+var rCte = conn.executarLinConEs("COM altos COMO (SELECIONAR nome, valor DE itens_mariadb ONDE valor >= 100) SELECIONAR nome, valor, NUMERO_LINHA() SOBRE (ORDENAR POR valor DECRESCENTE) COMO rn DE altos;")
+afirmar(rCte.numLinhas == 2 e rCte.numColunas == 3, "CTE+Window no MariaDB deveria retornar 2x3")
+
+// 4. Tratamento controlado de erro SQL
+var pegouErro: logico = falso
+tente {
+    conn.executarLinConEs("SELECIONAR x DE tabela_que_nao_existe_123;")
+} pegue (err) {
+    pegouErro = verdadeiro
+}
+afirmar(pegouErro, "Erro SQL no MariaDB deveria lançar exceção controlada")
+
+conn.fechar()
+escreva("validar_mariadb_vivo: OK")
