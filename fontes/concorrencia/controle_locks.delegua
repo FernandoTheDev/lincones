@@ -1,0 +1,58 @@
+modulo concorrencia.controle_locks
+
+// Controle de concorrência: múltiplos leitores simultâneos, escritor único por banco.
+// Complementa a trava exclusiva multiprocesso (flock) do GerenciadorPaginas.
+classe ControleLocks {
+    leitoresAtivos: inteiro
+    escritorAtivo: logico
+    idEscritor: inteiro
+    contencoes: inteiro
+    aquisicoesLeitura: inteiro
+    aquisicoesEscrita: inteiro
+
+    construtor() {
+        isto.leitoresAtivos = 0
+        isto.escritorAtivo = falso
+        isto.idEscritor = 0
+        isto.contencoes = 0
+        isto.aquisicoesLeitura = 0
+        isto.aquisicoesEscrita = 0
+    }
+
+    adquirirLeitura(idConexao: inteiro): logico {
+        se (isto.escritorAtivo e isto.idEscritor != idConexao) {
+            isto.contencoes = isto.contencoes + 1
+            retorna falso
+        }
+        isto.leitoresAtivos = isto.leitoresAtivos + 1
+        isto.aquisicoesLeitura = isto.aquisicoesLeitura + 1
+        retorna verdadeiro
+    }
+
+    liberarLeitura(): vazio {
+        se (isto.leitoresAtivos > 0) {
+            isto.leitoresAtivos = isto.leitoresAtivos - 1
+        }
+    }
+
+    adquirirEscrita(idConexao: inteiro): logico {
+        se (isto.escritorAtivo e isto.idEscritor == idConexao) {
+            retorna verdadeiro
+        }
+        se (isto.escritorAtivo ou isto.leitoresAtivos > 0) {
+            isto.contencoes = isto.contencoes + 1
+            retorna falso
+        }
+        isto.escritorAtivo = verdadeiro
+        isto.idEscritor = idConexao
+        isto.aquisicoesEscrita = isto.aquisicoesEscrita + 1
+        retorna verdadeiro
+    }
+
+    liberarEscrita(idConexao: inteiro): vazio {
+        se (isto.escritorAtivo e isto.idEscritor == idConexao) {
+            isto.escritorAtivo = falso
+            isto.idEscritor = 0
+        }
+    }
+}

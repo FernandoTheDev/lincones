@@ -1,0 +1,64 @@
+importar armazenamento.posix_io como Pio
+importar armazenamento.registros como Reg
+importar paginas.formato como Fmt
+importar paginas.gerenciador_paginas como Pag
+importar tipos.valor como Val
+
+funcao afirmar(condicao: logico, msg: texto): vazio {
+    se (!condicao) {
+        falhar "FALHA ARMAZENAMENTO: " + msg
+    }
+}
+
+const caminhoBanco: texto = "/tmp/lincones_teste_armazenamento.lce"
+Pio.PosixIO.unlink(caminhoBanco)
+
+// 1. Buffer Pool com orçamento pequeno (4 páginas) manipulando muito mais páginas em arquivo real
+var pager = Pag.GerenciadorPaginas(caminhoBanco, 4, verdadeiro)
+pager.abrir()
+var pagRaiz: inteiro = pager.alocarPagina(Fmt.tipoPaginaDados())
+var arm = Reg.ArmazenamentoTabela(pager)
+
+// Inserir 250 registros (~60 bytes cada = ~15 KiB -> ~5+ páginas, excedendo cache de 4 páginas!)
+var rids: Reg.IdRegistro[] = []
+para (var i: inteiro = 1; i <= 250; i = i + 1) {
+    var tupla: Val.Valor[] = [
+        Val.Valor.deInteiro(i),
+        Val.Valor.deTexto("Usuario_Numero_" + texto(i) + "_DadosExtrasParaOcuparEspacoNaPagina"),
+        (i % 5 == 0) ? Val.Valor.nuloVal() : Val.Valor.deDecimal(i * 100 + 50, 2),
+        Val.Valor.deLogico((i % 2) == 0)
+    ]
+    rids.adicionar(arm.inserirRegistro(pagRaiz, tupla))
+}
+
+afirmar(pager.totalPaginas > 5, "Banco deve ter crescido além do cache de 4 páginas (total=${pager.totalPaginas})")
+afirmar(pager.descartesCache > 0, "Cache CLOCK deve ter realizado descartes controlados")
+
+// Excluir alguns registros e atualizar outro
+afirmar(arm.excluirRegistro(rids[0]), "Exclusão do registro 1 deve ter sucesso")
+arm.atualizarRegistro(pagRaiz, rids[1], [
+    Val.Valor.deInteiro(2),
+    Val.Valor.deTexto("Atualizado_2"),
+    Val.Valor.deDecimal(9999, 2),
+    Val.Valor.deLogico(falso)
+])
+
+// Fechar e reabrir do disco para validar persistência binária real e checksums CRC32
+pager.fechar()
+
+var pager2 = Pag.GerenciadorPaginas(caminhoBanco, 4, verdadeiro)
+pager2.abrir()
+var arm2 = Reg.ArmazenamentoTabela(pager2)
+var todos: Reg.RegistroLido[] = arm2.varrerTabela(pagRaiz)
+afirmar(todos.tamanho() == 249, "Esperados 249 registros após persistência, obtidos " + texto(todos.tamanho()))
+
+var rec2: qualquer = arm2.lerRegistro(rids[1])
+afirmar(rec2 != nulo e rec2[1].textoVal == "Atualizado_2", "Registro 2 atualizado deve persistir")
+afirmar(arm2.lerRegistro(rids[0]) == nulo, "Registro 1 excluído deve permanecer excluído")
+
+var rec5: qualquer = arm2.lerRegistro(rids[4])
+afirmar(rec5 != nulo e rec5[2].ehNulo(), "Coluna NULA deve ser preservada pelo bitmap de nulidade")
+
+pager2.fechar()
+Pio.PosixIO.unlink(caminhoBanco)
+escreva("armazenamento_teste: OK")

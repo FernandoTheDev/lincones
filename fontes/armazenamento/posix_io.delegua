@@ -1,0 +1,59 @@
+modulo armazenamento.posix_io
+
+// Primitivas POSIX de acesso aleatório, durabilidade real (fsync/fdatasync) e
+// bloqueio multiprocesso (flock) via FFI C padrão do CGD.
+@definicao(biblioteca = "c", abi = "c")
+classe estrangeira PosixIO {
+    @definicao(simbolo = "open")
+    estatico open(caminho: texto, flags: cint, modo: cint): cint;
+    @definicao(simbolo = "close")
+    estatico close(fd: cint): cint;
+    @definicao(simbolo = "fdopen")
+    estatico fdopen(fd: cint, modo: texto): cu64;
+    @definicao(simbolo = "fseeko")
+    estatico fseeko(fp: cu64, offset: ci64, whence: cint): cint;
+    @definicao(simbolo = "fgetc_unlocked")
+    estatico fgetc(fp: cu64): cint;
+    @definicao(simbolo = "fputc_unlocked")
+    estatico fputc(c: cint, fp: cu64): cint;
+    @definicao(simbolo = "fflush_unlocked")
+    estatico fflush(fp: cu64): cint;
+    @definicao(simbolo = "fsync")
+    estatico fsync(fd: cint): cint;
+    @definicao(simbolo = "fdatasync")
+    estatico fdatasync(fd: cint): cint;
+    @definicao(simbolo = "ftruncate")
+    estatico ftruncate(fd: cint, tamanho: ci64): cint;
+    @definicao(simbolo = "flock")
+    estatico flock(fd: cint, op: cint): cint;
+    @definicao(simbolo = "lseek")
+    estatico lseek(fd: cint, offset: ci64, whence: cint): ci64;
+    @definicao(simbolo = "unlink")
+    estatico unlink(caminho: texto): cint;
+    @definicao(simbolo = "rename")
+    estatico rename(origem: texto, destino: texto): cint;
+}
+
+// Constantes POSIX Linux x86_64
+// O_RDWR = 2, O_CREAT = 64, O_TRUNC = 512
+funcao flagsAbrirLeituraEscrita(): inteiro {
+    retorna 66 // O_RDWR | O_CREAT
+}
+
+funcao flagsCriarTruncado(): inteiro {
+    retorna 578 // O_RDWR | O_CREAT | O_TRUNC
+}
+
+funcao modoArquivoPadrao(): inteiro {
+    retorna 420 // 0644
+}
+
+// flock
+funcao travaCompartilhada(): inteiro { retorna 1 } // LOCK_SH
+funcao travaExclusiva(): inteiro { retorna 2 }     // LOCK_EX
+funcao travaNaoBloqueante(): inteiro { retorna 4 } // LOCK_NB
+funcao destravar(): inteiro { retorna 8 }          // LOCK_UN
+
+// lseek / fseeko
+funcao origemInicio(): inteiro { retorna 0 }       // SEEK_SET
+funcao origemFim(): inteiro { retorna 2 }          // SEEK_END

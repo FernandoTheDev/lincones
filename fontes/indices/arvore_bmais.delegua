@@ -1,0 +1,492 @@
+modulo indices.arvore_bmais
+
+importar cgd.dados.binario como Bin
+importar paginas.formato como Fmt
+importar paginas.gerenciador_paginas como Pag
+importar armazenamento.registros como Reg
+importar tipos.valor como Val
+
+// Entrada em nó folha da B+ Tree.
+classe EntradaFolha {
+    chave: Val.Valor
+    ridCompacto: inteiro
+
+    construtor(chave: Val.Valor, ridCompacto: inteiro) {
+        isto.chave = chave
+        isto.ridCompacto = ridCompacto
+    }
+}
+
+// Resultado de divisão (split) propagado para cima.
+classe ResultadoDivisao {
+    ocorreu: logico
+    chavePromovida: Val.Valor
+    paginaDireita: inteiro
+
+    construtor(ocorreu: logico, chavePromovida: Val.Valor, paginaDireita: inteiro) {
+        isto.ocorreu = ocorreu
+        isto.chavePromovida = chavePromovida
+        isto.paginaDireita = paginaDireita
+    }
+}
+
+// Representação em memória de uma página folha desserializada.
+classe NoFolha {
+    idPagina: inteiro
+    proximaFolha: inteiro
+    entradas: EntradaFolha[]
+
+    construtor(idPagina: inteiro, proximaFolha: inteiro) {
+        isto.idPagina = idPagina
+        isto.proximaFolha = proximaFolha
+        isto.entradas = []
+    }
+}
+
+// Representação em memória de uma página interna desserializada.
+classe NoInterno {
+    idPagina: inteiro
+    chaves: Val.Valor[]
+    filhos: inteiro[] // filhos.tamanho() == chaves.tamanho() + 1
+
+    construtor(idPagina: inteiro) {
+        isto.idPagina = idPagina
+        isto.chaves = []
+        isto.filhos = []
+    }
+}
+
+// Árvore B+ persistente em páginas de 4096 bytes do GerenciadorPaginas.
+// Suporta chaves de qualquer TipoDado, chaves duplicadas ou únicas, busca exata,
+// busca por intervalo (via cadeia de folhas), splits, crescimento de raiz e verificação estrutural.
+classe ArvoreBMais {
+    pager: Pag.GerenciadorPaginas
+    paginaRaiz: inteiro
+    unica: logico
+    maxChavesFolha: inteiro
+    maxChavesInterno: inteiro
+
+    construtor(
+        pager: Pag.GerenciadorPaginas,
+        paginaRaiz: inteiro = 0,
+        unica: logico = falso,
+        maxChavesFolha: inteiro = 32,
+        maxChavesInterno: inteiro = 32
+    ) {
+        isto.pager = pager
+        isto.unica = unica
+        isto.maxChavesFolha = maxChavesFolha >= 4 ? maxChavesFolha : 4
+        isto.maxChavesInterno = maxChavesInterno >= 4 ? maxChavesInterno : 4
+        se (paginaRaiz <= 0) {
+            isto.paginaRaiz = pager.alocarPagina(Fmt.tipoPaginaBTreeFolha())
+        } senao {
+            isto.paginaRaiz = paginaRaiz
+        }
+    }
+
+    ehPaginaFolha(idPagina: inteiro): logico {
+        var buf: Bin.Bytes = isto.pager.obterPagina(idPagina)
+        retorna buf.obter(0) == Fmt.tipoPaginaBTreeFolha()
+    }
+
+    lerFolha(idPagina: inteiro): NoFolha {
+        var buf: Bin.Bytes = isto.pager.obterPagina(idPagina)
+        var num: inteiro = Fmt.lerU16LE(buf, 2)
+        var prox: inteiro = Fmt.lerU32LE(buf, 8)
+        var folha = NoFolha(idPagina, prox)
+        var pos: inteiro = 16
+        para (var i: inteiro = 0; i < num; i = i + 1) {
+            var tamChave: inteiro = Fmt.lerU16LE(buf, pos)
+            pos = pos + 2
+            var vals: Val.Valor[] = Reg.desserializarTupla(buf, pos, tamChave)
+            pos = pos + tamChave
+            var ridC: inteiro = Fmt.lerU64LE(buf, pos)
+            pos = pos + 8
+            folha.entradas.adicionar(EntradaFolha(vals[0], ridC))
+        }
+        retorna folha
+    }
+
+    gravarFolha(folha: NoFolha): vazio {
+        var buf: Bin.Bytes = Bin.Bytes.criar(4096)
+        Fmt.inicializarPagina(buf, Fmt.tipoPaginaBTreeFolha(), folha.proximaFolha)
+        var n: inteiro = folha.entradas.tamanho()
+        Fmt.escreverU16LE(buf, 2, n)
+        var pos: inteiro = 16
+        para (var i: inteiro = 0; i < n; i = i + 1) {
+            var ent: EntradaFolha = folha.entradas[i]
+            var chBytes: Bin.Bytes = Reg.serializarTupla([ent.chave])
+            var tamCh: inteiro = chBytes.tamanho()
+            se (pos + 2 + tamCh + 8 > 4096) {
+                falhar "Overflow de página folha B+ Tree (página ${folha.idPagina})."
+            }
+            Fmt.escreverU16LE(buf, pos, tamCh)
+            pos = pos + 2
+            var k: inteiro = 0
+            enquanto (k < tamCh) {
+                buf.definir(pos + k, chBytes.obter(k))
+                k = k + 1
+            }
+            pos = pos + tamCh
+            Fmt.escreverU64LE(buf, pos, ent.ridCompacto)
+            pos = pos + 8
+        }
+        Fmt.escreverU16LE(buf, 4, pos)
+        isto.pager.substituirConteudoPagina(folha.idPagina, buf)
+    }
+
+    lerInterno(idPagina: inteiro): NoInterno {
+        var buf: Bin.Bytes = isto.pager.obterPagina(idPagina)
+        var num: inteiro = Fmt.lerU16LE(buf, 2)
+        var filho0: inteiro = Fmt.lerU32LE(buf, 8)
+        var no = NoInterno(idPagina)
+        no.filhos.adicionar(filho0)
+        var pos: inteiro = 16
+        para (var i: inteiro = 0; i < num; i = i + 1) {
+            var tamChave: inteiro = Fmt.lerU16LE(buf, pos)
+            pos = pos + 2
+            var vals: Val.Valor[] = Reg.desserializarTupla(buf, pos, tamChave)
+            pos = pos + tamChave
+            var filhoDir: inteiro = Fmt.lerU32LE(buf, pos)
+            pos = pos + 4
+            no.chaves.adicionar(vals[0])
+            no.filhos.adicionar(filhoDir)
+        }
+        retorna no
+    }
+
+    gravarInterno(no: NoInterno): vazio {
+        var buf: Bin.Bytes = Bin.Bytes.criar(4096)
+        Fmt.inicializarPagina(buf, Fmt.tipoPaginaBTreeInterna(), no.filhos[0])
+        var n: inteiro = no.chaves.tamanho()
+        Fmt.escreverU16LE(buf, 2, n)
+        var pos: inteiro = 16
+        para (var i: inteiro = 0; i < n; i = i + 1) {
+            var chBytes: Bin.Bytes = Reg.serializarTupla([no.chaves[i]])
+            var tamCh: inteiro = chBytes.tamanho()
+            se (pos + 2 + tamCh + 4 > 4096) {
+                falhar "Overflow de página interna B+ Tree (página ${no.idPagina})."
+            }
+            Fmt.escreverU16LE(buf, pos, tamCh)
+            pos = pos + 2
+            var k: inteiro = 0
+            enquanto (k < tamCh) {
+                buf.definir(pos + k, chBytes.obter(k))
+                k = k + 1
+            }
+            pos = pos + tamCh
+            Fmt.escreverU32LE(buf, pos, no.filhos[i + 1])
+            pos = pos + 4
+        }
+        Fmt.escreverU16LE(buf, 4, pos)
+        isto.pager.substituirConteudoPagina(no.idPagina, buf)
+    }
+
+    encontrarFolha(chave: Val.Valor): inteiro {
+        var pagAtual: inteiro = isto.paginaRaiz
+        enquanto (!isto.ehPaginaFolha(pagAtual)) {
+            var no: NoInterno = isto.lerInterno(pagAtual)
+            var idx: inteiro = 0
+            enquanto (idx < no.chaves.tamanho() e Val.compararTotal(chave, no.chaves[idx]) >= 0) {
+                idx = idx + 1
+            }
+            pagAtual = no.filhos[idx]
+        }
+        retorna pagAtual
+    }
+
+    encontrarPrimeiraFolha(): inteiro {
+        var pagAtual: inteiro = isto.paginaRaiz
+        enquanto (!isto.ehPaginaFolha(pagAtual)) {
+            var no: NoInterno = isto.lerInterno(pagAtual)
+            pagAtual = no.filhos[0]
+        }
+        retorna pagAtual
+    }
+
+    buscarExato(chave: Val.Valor): Reg.IdRegistro[] {
+        var resultado: Reg.IdRegistro[] = []
+        var pagAtual: inteiro = isto.encontrarFolha(chave)
+        enquanto (pagAtual > 0) {
+            var folha: NoFolha = isto.lerFolha(pagAtual)
+            var ultrapassou: logico = falso
+            para (var i: inteiro = 0; i < folha.entradas.tamanho(); i = i + 1) {
+                var cmp: inteiro = Val.compararTotal(folha.entradas[i].chave, chave)
+                se (cmp == 0) {
+                    resultado.adicionar(Reg.IdRegistro.deChaveCompacta(folha.entradas[i].ridCompacto))
+                } senao se (cmp > 0) {
+                    ultrapassou = verdadeiro
+                    sustar
+                }
+            }
+            se (ultrapassou) {
+                sustar
+            }
+            pagAtual = folha.proximaFolha
+        }
+        retorna resultado
+    }
+
+    buscarIntervalo(
+        chaveMin: qualquer,
+        incluirMin: logico,
+        chaveMax: qualquer,
+        incluirMax: logico
+    ): Reg.IdRegistro[] {
+        var resultado: Reg.IdRegistro[] = []
+        var pagAtual: inteiro = chaveMin != nulo ? isto.encontrarFolha(chaveMin) : isto.encontrarPrimeiraFolha()
+        enquanto (pagAtual > 0) {
+            var folha: NoFolha = isto.lerFolha(pagAtual)
+            var ultrapassou: logico = falso
+            para (var i: inteiro = 0; i < folha.entradas.tamanho(); i = i + 1) {
+                var ch: Val.Valor = folha.entradas[i].chave
+                se (chaveMin != nulo) {
+                    var cMin: inteiro = Val.compararTotal(ch, chaveMin)
+                    se (cMin < 0 ou (!incluirMin e cMin == 0)) {
+                        continua
+                    }
+                }
+                se (chaveMax != nulo) {
+                    var cMax: inteiro = Val.compararTotal(ch, chaveMax)
+                    se (cMax > 0 ou (!incluirMax e cMax == 0)) {
+                        ultrapassou = verdadeiro
+                        sustar
+                    }
+                }
+                resultado.adicionar(Reg.IdRegistro.deChaveCompacta(folha.entradas[i].ridCompacto))
+            }
+            se (ultrapassou) {
+                sustar
+            }
+            pagAtual = folha.proximaFolha
+        }
+        retorna resultado
+    }
+
+    listarOrdenado(): EntradaFolha[] {
+        var todas: EntradaFolha[] = []
+        var pagAtual: inteiro = isto.encontrarPrimeiraFolha()
+        enquanto (pagAtual > 0) {
+            var folha: NoFolha = isto.lerFolha(pagAtual)
+            para (var i: inteiro = 0; i < folha.entradas.tamanho(); i = i + 1) {
+                todas.adicionar(folha.entradas[i])
+            }
+            pagAtual = folha.proximaFolha
+        }
+        retorna todas
+    }
+
+    inserir(chave: Val.Valor, rid: Reg.IdRegistro): vazio {
+        var ridC: inteiro = rid.chaveCompacta()
+        var div: ResultadoDivisao = isto.inserirRecursivo(isto.paginaRaiz, chave, ridC)
+        se (div.ocorreu) {
+            var novaRaizId: inteiro = isto.pager.alocarPagina(Fmt.tipoPaginaBTreeInterna())
+            var novaRaiz = NoInterno(novaRaizId)
+            novaRaiz.filhos.adicionar(isto.paginaRaiz)
+            novaRaiz.chaves.adicionar(div.chavePromovida)
+            novaRaiz.filhos.adicionar(div.paginaDireita)
+            isto.gravarInterno(novaRaiz)
+            isto.paginaRaiz = novaRaizId
+        }
+    }
+
+    inserirRecursivo(idPagina: inteiro, chave: Val.Valor, ridC: inteiro): ResultadoDivisao {
+        se (isto.ehPaginaFolha(idPagina)) {
+            var folha: NoFolha = isto.lerFolha(idPagina)
+            // Verifica unicidade se aplicável
+            se (isto.unica e !chave.ehNulo()) {
+                para (var u: inteiro = 0; u < folha.entradas.tamanho(); u = u + 1) {
+                    se (Val.compararTotal(folha.entradas[u].chave, chave) == 0) {
+                        falhar "Violação de restrição de unicidade na chave '${chave.paraTexto()}'."
+                    }
+                }
+            }
+            // Inserção ordenada por chave (e ridC como desempate determinístico)
+            var novas: EntradaFolha[] = []
+            var inserido: logico = falso
+            para (var i: inteiro = 0; i < folha.entradas.tamanho(); i = i + 1) {
+                var ent: EntradaFolha = folha.entradas[i]
+                var cmp: inteiro = Val.compararTotal(chave, ent.chave)
+                se (!inserido e (cmp < 0 ou (cmp == 0 e ridC < ent.ridCompacto))) {
+                    novas.adicionar(EntradaFolha(chave, ridC))
+                    inserido = verdadeiro
+                }
+                novas.adicionar(ent)
+            }
+            se (!inserido) {
+                novas.adicionar(EntradaFolha(chave, ridC))
+            }
+            folha.entradas = novas
+
+            // Verifica necessidade de split (por contagem ou tamanho estimado)
+            se (folha.entradas.tamanho() <= isto.maxChavesFolha) {
+                isto.gravarFolha(folha)
+                retorna ResultadoDivisao(falso, Val.Valor.nuloVal(), 0)
+            }
+
+            // Split da folha
+            var meio: inteiro = folha.entradas.tamanho() \ 2
+            var novaFolhaId: inteiro = isto.pager.alocarPagina(Fmt.tipoPaginaBTreeFolha())
+            var folhaDir = NoFolha(novaFolhaId, folha.proximaFolha)
+            var entradasEsq: EntradaFolha[] = []
+            para (var k: inteiro = 0; k < folha.entradas.tamanho(); k = k + 1) {
+                se (k < meio) {
+                    entradasEsq.adicionar(folha.entradas[k])
+                } senao {
+                    folhaDir.entradas.adicionar(folha.entradas[k])
+                }
+            }
+            folha.entradas = entradasEsq
+            folha.proximaFolha = novaFolhaId
+            isto.gravarFolha(folha)
+            isto.gravarFolha(folhaDir)
+            retorna ResultadoDivisao(verdadeiro, folhaDir.entradas[0].chave, novaFolhaId)
+        }
+
+        // Nó interno
+        var no: NoInterno = isto.lerInterno(idPagina)
+        var idx: inteiro = 0
+        enquanto (idx < no.chaves.tamanho() e Val.compararTotal(chave, no.chaves[idx]) >= 0) {
+            idx = idx + 1
+        }
+        var divFilho: ResultadoDivisao = isto.inserirRecursivo(no.filhos[idx], chave, ridC)
+        se (!divFilho.ocorreu) {
+            retorna ResultadoDivisao(falso, Val.Valor.nuloVal(), 0)
+        }
+
+        // Insere chave promovida e filho direito em `no` na posição `idx`
+        var novasChaves: Val.Valor[] = []
+        var novosFilhos: inteiro[] = []
+        novosFilhos.adicionar(no.filhos[0])
+        para (var c: inteiro = 0; c < no.chaves.tamanho(); c = c + 1) {
+            se (c == idx) {
+                novasChaves.adicionar(divFilho.chavePromovida)
+                novosFilhos.adicionar(divFilho.paginaDireita)
+            }
+            novasChaves.adicionar(no.chaves[c])
+            novosFilhos.adicionar(no.filhos[c + 1])
+        }
+        se (idx == no.chaves.tamanho()) {
+            novasChaves.adicionar(divFilho.chavePromovida)
+            novosFilhos.adicionar(divFilho.paginaDireita)
+        }
+        no.chaves = novasChaves
+        no.filhos = novosFilhos
+
+        se (no.chaves.tamanho() <= isto.maxChavesInterno) {
+            isto.gravarInterno(no)
+            retorna ResultadoDivisao(falso, Val.Valor.nuloVal(), 0)
+        }
+
+        // Split do nó interno
+        var meioInt: inteiro = no.chaves.tamanho() \ 2
+        var chaveMeio: Val.Valor = no.chaves[meioInt]
+        var novoIntId: inteiro = isto.pager.alocarPagina(Fmt.tipoPaginaBTreeInterna())
+        var noDir = NoInterno(novoIntId)
+        var chEsq: Val.Valor[] = []
+        var fiEsq: inteiro[] = []
+        para (var j: inteiro = 0; j < meioInt; j = j + 1) {
+            chEsq.adicionar(no.chaves[j])
+            fiEsq.adicionar(no.filhos[j])
+        }
+        fiEsq.adicionar(no.filhos[meioInt])
+
+        noDir.filhos.adicionar(no.filhos[meioInt + 1])
+        para (var m: inteiro = meioInt + 1; m < no.chaves.tamanho(); m = m + 1) {
+            noDir.chaves.adicionar(no.chaves[m])
+            noDir.filhos.adicionar(no.filhos[m + 1])
+        }
+        no.chaves = chEsq
+        no.filhos = fiEsq
+        isto.gravarInterno(no)
+        isto.gravarInterno(noDir)
+        retorna ResultadoDivisao(verdadeiro, chaveMeio, novoIntId)
+    }
+
+    excluir(chave: Val.Valor, rid: Reg.IdRegistro): logico {
+        var ridC: inteiro = rid.chaveCompacta()
+        var pagAtual: inteiro = isto.encontrarFolha(chave)
+        enquanto (pagAtual > 0) {
+            var folha: NoFolha = isto.lerFolha(pagAtual)
+            var removida: logico = falso
+            var novas: EntradaFolha[] = []
+            para (var i: inteiro = 0; i < folha.entradas.tamanho(); i = i + 1) {
+                var ent: EntradaFolha = folha.entradas[i]
+                se (!removida e Val.compararTotal(ent.chave, chave) == 0 e ent.ridCompacto == ridC) {
+                    removida = verdadeiro
+                } senao {
+                    novas.adicionar(ent)
+                }
+            }
+            se (removida) {
+                folha.entradas = novas
+                isto.gravarFolha(folha)
+                retorna verdadeiro
+            }
+            se (folha.entradas.tamanho() > 0 e Val.compararTotal(folha.entradas[folha.entradas.tamanho() - 1].chave, chave) > 0) {
+                retorna falso
+            }
+            pagAtual = folha.proximaFolha
+        }
+        retorna falso
+    }
+
+    // Verificador estrutural completo da B+ Tree:
+    // verifica ordenação das chaves, profundidade uniforme de folhas, ausência de ciclos e cadeia de folhas.
+    verificarIntegridade(): texto[] {
+        var erros: texto[] = []
+        var visitadas: inteiro[] = []
+        var profFolhas: inteiro[] = []
+        isto.verificarNo(isto.paginaRaiz, 0, visitadas, profFolhas, erros)
+        // Profundidade uniforme das folhas
+        se (profFolhas.tamanho() > 1) {
+            var p0: inteiro = profFolhas[0]
+            para (var i: inteiro = 1; i < profFolhas.tamanho(); i = i + 1) {
+                se (profFolhas[i] != p0) {
+                    erros.adicionar("Profundidade não uniforme das folhas: esperado ${p0}, encontrado ${profFolhas[i]}.")
+                }
+            }
+        }
+        // Cadeia de folhas ordenada globalmente
+        var todas: EntradaFolha[] = isto.listarOrdenado()
+        para (var k: inteiro = 1; k < todas.tamanho(); k = k + 1) {
+            se (Val.compararTotal(todas[k - 1].chave, todas[k].chave) > 0) {
+                erros.adicionar("Desordenação global na cadeia de folhas na posição ${k}.")
+            }
+        }
+        retorna erros
+    }
+
+    verificarNo(idPag: inteiro, nivel: inteiro, visitadas: inteiro[], profFolhas: inteiro[], erros: texto[]): vazio {
+        para (var v: inteiro = 0; v < visitadas.tamanho(); v = v + 1) {
+            se (visitadas[v] == idPag) {
+                erros.adicionar("Ciclo detectado na página ${idPag}.")
+                retorna
+            }
+        }
+        visitadas.adicionar(idPag)
+        se (isto.ehPaginaFolha(idPag)) {
+            profFolhas.adicionar(nivel)
+            var folha: NoFolha = isto.lerFolha(idPag)
+            para (var i: inteiro = 1; i < folha.entradas.tamanho(); i = i + 1) {
+                se (Val.compararTotal(folha.entradas[i - 1].chave, folha.entradas[i].chave) > 0) {
+                    erros.adicionar("Chaves fora de ordem na folha ${idPag}.")
+                }
+            }
+            retorna
+        }
+        var no: NoInterno = isto.lerInterno(idPag)
+        se (no.filhos.tamanho() != no.chaves.tamanho() + 1) {
+            erros.adicionar("Nó interno ${idPag} com contagem inconsistente de filhos.")
+            retorna
+        }
+        para (var c: inteiro = 1; c < no.chaves.tamanho(); c = c + 1) {
+            se (Val.compararTotal(no.chaves[c - 1], no.chaves[c]) > 0) {
+                erros.adicionar("Chaves fora de ordem no nó interno ${idPag}.")
+            }
+        }
+        para (var f: inteiro = 0; f < no.filhos.tamanho(); f = f + 1) {
+            isto.verificarNo(no.filhos[f], nivel + 1, visitadas, profFolhas, erros)
+        }
+    }
+}

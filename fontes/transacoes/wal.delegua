@@ -1,0 +1,399 @@
+modulo transacoes.wal
+
+importar cgd.dados.binario como Bin
+importar armazenamento.posix_io como Pio
+importar paginas.formato como Fmt
+importar paginas.gerenciador_paginas como Pag
+importar serializacao.crc32 como Crc
+
+funcao assinaturaWal(): inteiro { retorna 827081047 } // 'W','A','L','1' em LE
+funcao tamanhoCabecalhoWal(): inteiro { retorna 16 }
+funcao tamanhoQuadroWal(): inteiro { retorna 4116 }   // 20 bytes cabecalho + 4096 bytes pagina
+funcao tipoQuadroPagina(): inteiro { retorna 1 }
+funcao tipoQuadroCommit(): inteiro { retorna 2 }
+
+classe QuadroWalLido {
+    txId: inteiro
+    tipoQuadro: inteiro
+    idPagina: inteiro
+    totalPaginas: inteiro
+    dados: Bin.Bytes
+
+    construtor(txId: inteiro, tipoQuadro: inteiro, idPagina: inteiro, totalPaginas: inteiro, dados: Bin.Bytes) {
+        isto.txId = txId
+        isto.tipoQuadro = tipoQuadro
+        isto.idPagina = idPagina
+        isto.totalPaginas = totalPaginas
+        isto.dados = dados
+    }
+}
+
+classe InstantaneoPagina {
+    idPagina: inteiro
+    imagemAntes: Bin.Bytes
+
+    construtor(idPagina: inteiro, imagemAntes: Bin.Bytes) {
+        isto.idPagina = idPagina
+        isto.imagemAntes = imagemAntes
+    }
+}
+
+classe PontoSalvamento {
+    nome: texto
+    indiceInstantaneo: inteiro
+    totalPaginasAntes: inteiro
+
+    construtor(nome: texto, indiceInstantaneo: inteiro, totalPaginasAntes: inteiro) {
+        isto.nome = nome
+        isto.indiceInstantaneo = indiceInstantaneo
+        isto.totalPaginasAntes = totalPaginasAntes
+    }
+}
+
+funcao calcularCrcQuadro(quadro: Bin.Bytes): inteiro {
+    var crc: inteiro = 4294967295
+    var i: inteiro = 0
+    enquanto (i < 16) {
+        crc = Crc.atualizarByteCrc32(crc, quadro.obter(i))
+        i = i + 1
+    }
+    i = 20
+    enquanto (i < 4116) {
+        crc = Crc.atualizarByteCrc32(crc, quadro.obter(i))
+        i = i + 1
+    }
+    retorna (crc ^ 4294967295) & 4294967295
+}
+
+// Write-Ahead Log físico por páginas + Gerenciador de Transações com Savepoints e Recuperação Idempotente.
+classe GerenciadorWal {
+    caminhoWal: texto
+    emMemoria: logico
+    duravel: logico
+    emTransacao: logico
+    txIdAtual: inteiro
+    totalPaginasInicioTx: inteiro
+    instantaneosAntes: InstantaneoPagina[]
+    paginasModificadas: inteiro[]
+    pontosSalvamento: PontoSalvamento[]
+
+    // Estatísticas
+    transacoesConfirmadas: inteiro
+    transacoesRevertidas: inteiro
+    checkpointsRealizados: inteiro
+    quadrosWalEscritos: inteiro
+    transacoesRecuperadas: inteiro
+
+    construtor(caminhoBanco: texto, duravel: logico = verdadeiro) {
+        isto.emMemoria = (caminhoBanco == ":memoria:" ou caminhoBanco == "")
+        isto.caminhoWal = isto.emMemoria ? "" : (caminhoBanco + "-wal")
+        isto.duravel = duravel
+        isto.emTransacao = falso
+        isto.txIdAtual = 0
+        isto.totalPaginasInicioTx = 0
+        isto.instantaneosAntes = []
+        isto.paginasModificadas = []
+        isto.pontosSalvamento = []
+        isto.transacoesConfirmadas = 0
+        isto.transacoesRevertidas = 0
+        isto.checkpointsRealizados = 0
+        isto.quadrosWalEscritos = 0
+        isto.transacoesRecuperadas = 0
+    }
+
+    // Inicia transação explícita capturando snapshot base das páginas atuais.
+    iniciarTransacao(pager: Pag.GerenciadorPaginas): vazio {
+        se (isto.emTransacao) {
+            falhar "Já existe uma transação ativa."
+        }
+        isto.emTransacao = verdadeiro
+        isto.txIdAtual = pager.proximoTxId
+        pager.proximoTxId = pager.proximoTxId + 1
+        isto.totalPaginasInicioTx = pager.totalPaginas
+        isto.instantaneosAntes = []
+        isto.paginasModificadas = []
+        isto.pontosSalvamento = []
+        // Captura snapshot de todas as páginas existentes para atomicidade completa em rollback/savepoints
+        para (var p: inteiro = 0; p < pager.totalPaginas; p = p + 1) {
+            var img: Bin.Bytes = pager.obterPagina(p).copiar()
+            isto.instantaneosAntes.adicionar(InstantaneoPagina(p, img))
+        }
+    }
+
+    criarPontoSalvamento(nome: texto, pager: Pag.GerenciadorPaginas): vazio {
+        se (!isto.emTransacao) {
+            falhar "PONTO DE SALVAMENTO exige uma transação ativa."
+        }
+        // Salva um novo checkpoint de imagens atuais para permitir rollback parcial até este ponto
+        var idxInicio: inteiro = isto.instantaneosAntes.tamanho()
+        para (var p: inteiro = 0; p < pager.totalPaginas; p = p + 1) {
+            var img: Bin.Bytes = pager.obterPagina(p).copiar()
+            isto.instantaneosAntes.adicionar(InstantaneoPagina(p, img))
+        }
+        isto.pontosSalvamento.adicionar(PontoSalvamento(nome.minusculo(), idxInicio, pager.totalPaginas))
+    }
+
+    reverterParaPonto(nome: texto, pager: Pag.GerenciadorPaginas): vazio {
+        se (!isto.emTransacao) {
+            falhar "REVERTER PARA exige uma transação ativa."
+        }
+        var alvo: texto = nome.minusculo()
+        var idxPonto: inteiro = -1
+        para (var i: inteiro = isto.pontosSalvamento.tamanho() - 1; i >= 0; i = i - 1) {
+            se (isto.pontosSalvamento[i].nome == alvo) {
+                idxPonto = i
+                sustar
+            }
+        }
+        se (idxPonto < 0) {
+            falhar "Ponto de salvamento '${nome}' não encontrado."
+        }
+        var ps: PontoSalvamento = isto.pontosSalvamento[idxPonto]
+        var fimIdx: inteiro = ps.indiceInstantaneo + ps.totalPaginasAntes
+        para (var k: inteiro = ps.indiceInstantaneo; k < fimIdx; k = k + 1) {
+            var snap: InstantaneoPagina = isto.instantaneosAntes[k]
+            pager.substituirConteudoPagina(snap.idPagina, snap.imagemAntes.copiar())
+        }
+        pager.totalPaginas = ps.totalPaginasAntes
+        // Remove pontos posteriores
+        var novosPontos: PontoSalvamento[] = []
+        para (var j: inteiro = 0; j <= idxPonto; j = j + 1) {
+            novosPontos.adicionar(isto.pontosSalvamento[j])
+        }
+        isto.pontosSalvamento = novosPontos
+    }
+
+    liberarPonto(nome: texto): vazio {
+        var alvo: texto = nome.minusculo()
+        var novos: PontoSalvamento[] = []
+        var achou: logico = falso
+        para (var i: inteiro = 0; i < isto.pontosSalvamento.tamanho(); i = i + 1) {
+            se (isto.pontosSalvamento[i].nome == alvo) {
+                achou = verdadeiro
+                sustar
+            }
+            novos.adicionar(isto.pontosSalvamento[i])
+        }
+        se (!achou) {
+            falhar "Ponto de salvamento '${nome}' não encontrado."
+        }
+        isto.pontosSalvamento = novos
+    }
+
+    reverterTransacao(pager: Pag.GerenciadorPaginas): vazio {
+        se (!isto.emTransacao) {
+            falhar "Nenhuma transação ativa para reverter."
+        }
+        para (var p: inteiro = 0; p < isto.totalPaginasInicioTx; p = p + 1) {
+            var snap: InstantaneoPagina = isto.instantaneosAntes[p]
+            pager.substituirConteudoPagina(snap.idPagina, snap.imagemAntes.copiar())
+        }
+        pager.totalPaginas = isto.totalPaginasInicioTx
+        pager.gravarCabecalho()
+        isto.emTransacao = falso
+        isto.instantaneosAntes = []
+        isto.paginasModificadas = []
+        isto.pontosSalvamento = []
+        isto.transacoesRevertidas = isto.transacoesRevertidas + 1
+    }
+
+    // Grava todas as páginas alteradas no arquivo WAL com CRC32 e fdatasync antes do checkpoint no .lce.
+    gravarWalNoDisco(pager: Pag.GerenciadorPaginas, txId: inteiro, incluirCommit: logico = verdadeiro): vazio {
+        se (isto.emMemoria) { retorna }
+        var fd: inteiro = Pio.PosixIO.open(isto.caminhoWal, Pio.flagsCriarTruncado(), Pio.modoArquivoPadrao())
+        se (fd < 0) {
+            falhar "Falha ao abrir arquivo WAL: " + isto.caminhoWal
+        }
+        var fp: inteiro = Pio.PosixIO.fdopen(fd, "r+b")
+        // Cabeçalho WAL (16 bytes)
+        var cab: Bin.Bytes = Bin.Bytes.criar(16)
+        Fmt.escreverU32LE(cab, 0, assinaturaWal())
+        Fmt.escreverU32LE(cab, 4, 1)
+        Fmt.escreverU32LE(cab, 8, 4096)
+        Fmt.escreverU32LE(cab, 12, Crc.calcularCrc32Bytes(cab, 0, 12))
+        para (var i: inteiro = 0; i < 16; i = i + 1) {
+            Pio.PosixIO.fputc(cab.obter(i), fp)
+        }
+
+        // Grava cada página modificada (1..totalPaginas-1)
+        para (var p: inteiro = 1; p < pager.totalPaginas; p = p + 1) {
+            var pagBuf: Bin.Bytes = pager.obterPagina(p)
+            Fmt.atualizarChecksumPagina(pagBuf)
+            isto.escreverQuadroWal(fp, txId, tipoQuadroPagina(), p, pager.totalPaginas, pagBuf)
+        }
+
+        // Grava quadro de COMMIT com a página 0 atualizada
+        se (incluirCommit) {
+            var pag0: Bin.Bytes = Bin.Bytes.criar(4096)
+            Fmt.inicializarCabecalhoBanco(
+                pag0,
+                pager.totalPaginas,
+                pager.cabecaLivres,
+                pager.paginaCatalogo,
+                pager.versaoEsquema,
+                pager.proximoTxId
+            )
+            isto.escreverQuadroWal(fp, txId, tipoQuadroCommit(), 0, pager.totalPaginas, pag0)
+        }
+
+        Pio.PosixIO.fflush(fp)
+        se (isto.duravel) {
+            var sr: inteiro = Pio.PosixIO.fdatasync(fd)
+            se (sr != 0) {
+                Pio.PosixIO.close(fd)
+                falhar "Falha em fdatasync do arquivo WAL."
+            }
+        }
+        Pio.PosixIO.close(fd)
+    }
+
+    escreverQuadroWal(
+        fp: inteiro,
+        txId: inteiro,
+        tipoQ: inteiro,
+        idPag: inteiro,
+        totalPags: inteiro,
+        pagBuf: Bin.Bytes
+    ): vazio {
+        var q: Bin.Bytes = Bin.Bytes.criar(4116)
+        Fmt.escreverU32LE(q, 0, txId)
+        Fmt.escreverU32LE(q, 4, tipoQ)
+        Fmt.escreverU32LE(q, 8, idPag)
+        Fmt.escreverU32LE(q, 12, totalPags)
+        var k: inteiro = 0
+        enquanto (k < 4096) {
+            q.definir(20 + k, pagBuf.obter(k))
+            k = k + 1
+        }
+        var crc: inteiro = calcularCrcQuadro(q)
+        Fmt.escreverU32LE(q, 16, crc)
+        var j: inteiro = 0
+        enquanto (j < 4116) {
+            Pio.PosixIO.fputc(q.obter(j), fp)
+            j = j + 1
+        }
+        isto.quadrosWalEscritos = isto.quadrosWalEscritos + 1
+    }
+
+    confirmarTransacao(pager: Pag.GerenciadorPaginas): vazio {
+        se (!isto.emTransacao) {
+            falhar "Nenhuma transação ativa para confirmar."
+        }
+        // 1. Write-Ahead: escreve e sincroniza WAL antes de aplicar ao arquivo principal
+        isto.gravarWalNoDisco(pager, isto.txIdAtual, verdadeiro)
+        // 2. Checkpoint seguro no arquivo principal .lce
+        pager.descarregarTodas()
+        isto.checkpointsRealizados = isto.checkpointsRealizados + 1
+        // 3. Remove/trunca WAL após checkpoint durável concluído
+        se (!isto.emMemoria) {
+            Pio.PosixIO.unlink(isto.caminhoWal)
+        }
+        isto.emTransacao = falso
+        isto.instantaneosAntes = []
+        isto.paginasModificadas = []
+        isto.pontosSalvamento = []
+        isto.transacoesConfirmadas = isto.transacoesConfirmadas + 1
+    }
+
+    // Recuperação idempotente a partir de um arquivo .lce-wal existente após encerramento abrupto.
+    recuperarDoWal(pager: Pag.GerenciadorPaginas): inteiro {
+        se (isto.emMemoria) { retorna 0 }
+        var fd: inteiro = Pio.PosixIO.open(isto.caminhoWal, 0, 0) // O_RDONLY = 0
+        se (fd < 0) {
+            retorna 0 // Sem WAL pendente
+        }
+        var tamWal: inteiro = Pio.PosixIO.lseek(fd, 0, Pio.origemFim())
+        se (tamWal < 16) {
+            Pio.PosixIO.close(fd)
+            Pio.PosixIO.unlink(isto.caminhoWal)
+            retorna 0
+        }
+        Pio.PosixIO.lseek(fd, 0, Pio.origemInicio())
+        var fp: inteiro = Pio.PosixIO.fdopen(fd, "rb")
+
+        // Valida cabeçalho WAL
+        var cab: Bin.Bytes = Bin.Bytes.criar(16)
+        para (var i: inteiro = 0; i < 16; i = i + 1) {
+            var b: inteiro = Pio.PosixIO.fgetc(fp)
+            se (b < 0) {
+                Pio.PosixIO.close(fd)
+                Pio.PosixIO.unlink(isto.caminhoWal)
+                retorna 0
+            }
+            cab.definir(i, b)
+        }
+        var crcCabEsperado: inteiro = Fmt.lerU32LE(cab, 12)
+        var crcCabCalc: inteiro = Crc.calcularCrc32Bytes(cab, 0, 12)
+        se (Fmt.lerU32LE(cab, 0) != assinaturaWal() ou crcCabEsperado != crcCabCalc) {
+            Pio.PosixIO.close(fd)
+            Pio.PosixIO.unlink(isto.caminhoWal)
+            retorna 0
+        }
+
+        // Lê todos os quadros válidos (para ao encontrar quadro truncado ou checksum inválido)
+        var numQuadrosPossiveis: inteiro = (tamWal - 16) \ 4116
+        var pendentes: QuadroWalLido[] = []
+        var recuperadas: inteiro = 0
+
+        para (var qi: inteiro = 0; qi < numQuadrosPossiveis; qi = qi + 1) {
+            var qBuf: Bin.Bytes = Bin.Bytes.criar(4116)
+            var leituraOk: logico = verdadeiro
+            var j: inteiro = 0
+            enquanto (j < 4116) {
+                var bv: inteiro = Pio.PosixIO.fgetc(fp)
+                se (bv < 0) {
+                    leituraOk = falso
+                    sustar
+                }
+                qBuf.definir(j, bv)
+                j = j + 1
+            }
+            se (!leituraOk) {
+                sustar
+            }
+            var crcLido: inteiro = Fmt.lerU32LE(qBuf, 16)
+            var crcCalc: inteiro = calcularCrcQuadro(qBuf)
+            se (crcLido != crcCalc) {
+                // Quadro corrompido/parcial encerra a leitura (transação incompleta descartada)
+                sustar
+            }
+            var txId: inteiro = Fmt.lerU32LE(qBuf, 0)
+            var tipoQ: inteiro = Fmt.lerU32LE(qBuf, 4)
+            var idPag: inteiro = Fmt.lerU32LE(qBuf, 8)
+            var totPags: inteiro = Fmt.lerU32LE(qBuf, 12)
+            var imgPag: Bin.Bytes = qBuf.fatiar(20, 4116)
+
+            se (tipoQ == tipoQuadroPagina()) {
+                pendentes.adicionar(QuadroWalLido(txId, tipoQ, idPag, totPags, imgPag))
+            } senao se (tipoQ == tipoQuadroCommit()) {
+                // Transação confirmada! Aplica todas as páginas da transação ao arquivo principal
+                se (totPags > pager.totalPaginas) {
+                    pager.totalPaginas = totPags
+                }
+                para (var pIdx: inteiro = 0; pIdx < pendentes.tamanho(); pIdx = pIdx + 1) {
+                    var qP: QuadroWalLido = pendentes[pIdx]
+                    se (qP.txId == txId) {
+                        pager.substituirConteudoPagina(qP.idPagina, qP.dados)
+                    }
+                }
+                // Aplica cabeçalho da página 0
+                pager.substituirConteudoPagina(0, imgPag)
+                pager.totalPaginas = Fmt.lerU32LE(imgPag, 12)
+                pager.cabecaLivres = Fmt.lerU32LE(imgPag, 16)
+                pager.paginaCatalogo = Fmt.lerU32LE(imgPag, 20)
+                pager.versaoEsquema = Fmt.lerU32LE(imgPag, 24)
+                pager.proximoTxId = Fmt.lerU32LE(imgPag, 28)
+                pendentes = []
+                recuperadas = recuperadas + 1
+            }
+        }
+        Pio.PosixIO.close(fd)
+
+        se (recuperadas > 0) {
+            pager.descarregarTodas()
+            isto.transacoesRecuperadas = isto.transacoesRecuperadas + recuperadas
+        }
+        Pio.PosixIO.unlink(isto.caminhoWal)
+        retorna recuperadas
+    }
+}

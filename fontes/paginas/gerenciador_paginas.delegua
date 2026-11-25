@@ -1,0 +1,397 @@
+modulo paginas.gerenciador_paginas
+
+importar cgd.dados.binario como Bin
+importar armazenamento.posix_io como Pio
+importar paginas.formato como Fmt
+
+// Quadro residente no Buffer Pool.
+classe QuadroCache {
+    idPagina: inteiro
+    dados: Bin.Bytes
+    suja: logico
+    pinos: inteiro
+    usadoRecente: logico
+
+    construtor(idPagina: inteiro, dados: Bin.Bytes) {
+        isto.idPagina = idPagina
+        isto.dados = dados
+        isto.suja = falso
+        isto.pinos = 0
+        isto.usadoRecente = verdadeiro
+    }
+}
+
+// Gerenciador de Páginas + Buffer Pool CLOCK com orçamento configurável e
+// persistência binária paginada real via PosixIO (suporta bancos maiores que o cache).
+classe GerenciadorPaginas {
+    caminho: texto
+    emMemoria: logico
+    aberto: logico
+    fd: inteiro
+    fp: inteiro
+    duravel: logico
+    maxPaginasCache: inteiro
+
+    // Metadados do cabeçalho do banco (página 0)
+    totalPaginas: inteiro
+    cabecaLivres: inteiro
+    paginaCatalogo: inteiro
+    versaoEsquema: inteiro
+    proximoTxId: inteiro
+
+    // Armazenamento em memória (usado apenas quando emMemoria == verdadeiro)
+    paginasMemoria: Bin.Bytes[]
+
+    // Buffer pool (usado em modo arquivo)
+    quadros: QuadroCache[]
+    ponteiroRelogio: inteiro
+
+    // Estatísticas de observabilidade
+    leiturasDisco: inteiro
+    escritasDisco: inteiro
+    acertosCache: inteiro
+    perdasCache: inteiro
+    descartesCache: inteiro
+    sincronizacoesDisco: inteiro
+
+    // Hook de injeção de falha controlada (para testes de recuperação)
+    falharNaEscritaN: inteiro
+
+    construtor(caminho: texto = ":memoria:", maxPaginasCache: inteiro = 256, duravel: logico = verdadeiro) {
+        isto.caminho = caminho
+        isto.emMemoria = (caminho == ":memoria:" ou caminho == "")
+        isto.aberto = falso
+        isto.fd = -1
+        isto.fp = 0
+        isto.duravel = duravel
+        isto.maxPaginasCache = maxPaginasCache > 4 ? maxPaginasCache : 4
+        isto.totalPaginas = 0
+        isto.cabecaLivres = 0
+        isto.paginaCatalogo = 1
+        isto.versaoEsquema = 1
+        isto.proximoTxId = 1
+        isto.paginasMemoria = []
+        isto.quadros = []
+        isto.ponteiroRelogio = 0
+        isto.leiturasDisco = 0
+        isto.escritasDisco = 0
+        isto.acertosCache = 0
+        isto.perdasCache = 0
+        isto.descartesCache = 0
+        isto.sincronizacoesDisco = 0
+        isto.falharNaEscritaN = -1
+    }
+
+    abrir(): vazio {
+        se (isto.aberto) { retorna }
+        se (isto.emMemoria) {
+            isto.aberto = verdadeiro
+            isto.inicializarBancoNovo()
+            retorna
+        }
+        isto.fd = Pio.PosixIO.open(isto.caminho, Pio.flagsAbrirLeituraEscrita(), Pio.modoArquivoPadrao())
+        se (isto.fd < 0) {
+            falhar "Falha ao abrir arquivo de banco: " + isto.caminho
+        }
+        var travaOk: inteiro = Pio.PosixIO.flock(isto.fd, Pio.travaExclusiva() + Pio.travaNaoBloqueante())
+        se (travaOk != 0) {
+            Pio.PosixIO.close(isto.fd)
+            isto.fd = -1
+            falhar "Arquivo de banco bloqueado por outro processo: " + isto.caminho
+        }
+        isto.fp = Pio.PosixIO.fdopen(isto.fd, "r+b")
+        se (isto.fp == 0) {
+            Pio.PosixIO.flock(isto.fd, Pio.destravar())
+            Pio.PosixIO.close(isto.fd)
+            isto.fd = -1
+            falhar "Falha ao inicializar fluxo de arquivo para: " + isto.caminho
+        }
+        isto.aberto = verdadeiro
+        var tamArquivo: inteiro = Pio.PosixIO.lseek(isto.fd, 0, Pio.origemFim())
+        se (tamArquivo == 0) {
+            isto.inicializarBancoNovo()
+        } senao {
+            se (tamArquivo < 4096 ou (tamArquivo % 4096) != 0) {
+                falhar "Arquivo de banco truncado ou corrompido (tamanho=${tamArquivo} bytes)."
+            }
+            var pag0: Bin.Bytes = isto.lerPaginaDisco(0)
+            se (!Fmt.validarCabecalhoBanco(pag0)) {
+                falhar "Cabeçalho inválido ou corrompido em: " + isto.caminho
+            }
+            isto.totalPaginas = Fmt.lerU32LE(pag0, 12)
+            isto.cabecaLivres = Fmt.lerU32LE(pag0, 16)
+            isto.paginaCatalogo = Fmt.lerU32LE(pag0, 20)
+            isto.versaoEsquema = Fmt.lerU32LE(pag0, 24)
+            isto.proximoTxId = Fmt.lerU32LE(pag0, 28)
+        }
+    }
+
+    inicializarBancoNovo(): vazio {
+        isto.totalPaginas = 2
+        isto.cabecaLivres = 0
+        isto.paginaCatalogo = 1
+        isto.versaoEsquema = 1
+        isto.proximoTxId = 1
+
+        var pag0: Bin.Bytes = Bin.Bytes.criar(4096)
+        Fmt.inicializarCabecalhoBanco(pag0, 2, 0, 1, 1, 1)
+        var pag1: Bin.Bytes = Bin.Bytes.criar(4096)
+        Fmt.inicializarPagina(pag1, Fmt.tipoPaginaCatalogo(), 0)
+
+        se (isto.emMemoria) {
+            isto.paginasMemoria = [pag0, pag1]
+        } senao {
+            Pio.PosixIO.ftruncate(isto.fd, 8192)
+            isto.escreverPaginaDisco(0, pag0)
+            isto.escreverPaginaDisco(1, pag1)
+            isto.sincronizarDisco()
+        }
+    }
+
+    gravarCabecalho(): vazio {
+        var pag0: Bin.Bytes = Bin.Bytes.criar(4096)
+        Fmt.inicializarCabecalhoBanco(
+            pag0,
+            isto.totalPaginas,
+            isto.cabecaLivres,
+            isto.paginaCatalogo,
+            isto.versaoEsquema,
+            isto.proximoTxId
+        )
+        se (isto.emMemoria) {
+            isto.paginasMemoria[0] = pag0
+        } senao {
+            isto.escreverPaginaDisco(0, pag0)
+        }
+    }
+
+    lerPaginaDisco(idPagina: inteiro): Bin.Bytes {
+        var buf: Bin.Bytes = Bin.Bytes.criar(4096)
+        var offset: inteiro = idPagina * 4096
+        Pio.PosixIO.fseeko(isto.fp, offset, Pio.origemInicio())
+        var i: inteiro = 0
+        enquanto (i < 4096) {
+            var b: inteiro = Pio.PosixIO.fgetc(isto.fp)
+            se (b < 0) {
+                falhar "Leitura parcial/EOF inesperado na página ${idPagina}."
+            }
+            buf.definir(i, b)
+            i = i + 1
+        }
+        isto.leiturasDisco = isto.leiturasDisco + 1
+        retorna buf
+    }
+
+    escreverPaginaDisco(idPagina: inteiro, buf: Bin.Bytes): vazio {
+        se (isto.falharNaEscritaN == 0) {
+            falhar "Falha injetada de escrita em disco na página ${idPagina}."
+        }
+        se (isto.falharNaEscritaN > 0) {
+            isto.falharNaEscritaN = isto.falharNaEscritaN - 1
+        }
+        var offset: inteiro = idPagina * 4096
+        Pio.PosixIO.fseeko(isto.fp, offset, Pio.origemInicio())
+        var i: inteiro = 0
+        enquanto (i < 4096) {
+            var r: inteiro = Pio.PosixIO.fputc(buf.obter(i), isto.fp)
+            se (r < 0) {
+                falhar "Erro de escrita em disco na página ${idPagina}."
+            }
+            i = i + 1
+        }
+        Pio.PosixIO.fflush(isto.fp)
+        isto.escritasDisco = isto.escritasDisco + 1
+    }
+
+    sincronizarDisco(): vazio {
+        se (isto.emMemoria ou !isto.aberto) { retorna }
+        Pio.PosixIO.fflush(isto.fp)
+        se (isto.duravel) {
+            var r: inteiro = Pio.PosixIO.fdatasync(isto.fd)
+            se (r != 0) {
+                falhar "Falha em fdatasync no arquivo de banco."
+            }
+            isto.sincronizacoesDisco = isto.sincronizacoesDisco + 1
+        }
+    }
+
+    buscarIndiceCache(idPagina: inteiro): inteiro {
+        para (var i: inteiro = 0; i < isto.quadros.tamanho(); i = i + 1) {
+            se (isto.quadros[i].idPagina == idPagina) {
+                retorna i
+            }
+        }
+        retorna -1
+    }
+
+    // Política CLOCK para despejo quando o Buffer Pool atinge maxPaginasCache.
+    escolherVitimaCache(): inteiro {
+        var n: inteiro = isto.quadros.tamanho()
+        var tentativas: inteiro = 0
+        enquanto (tentativas < n * 2 + 2) {
+            var idx: inteiro = isto.ponteiroRelogio % n
+            isto.ponteiroRelogio = (idx + 1) % n
+            var q: QuadroCache = isto.quadros[idx]
+            se (q.pinos == 0) {
+                se (!q.usadoRecente) {
+                    se (q.suja) {
+                        se (q.idPagina > 0) {
+                            Fmt.atualizarChecksumPagina(q.dados)
+                        }
+                        isto.escreverPaginaDisco(q.idPagina, q.dados)
+                        q.suja = falso
+                    }
+                    isto.descartesCache = isto.descartesCache + 1
+                    retorna idx
+                }
+                q.usadoRecente = falso
+            }
+            tentativas = tentativas + 1
+        }
+        falhar "Buffer pool esgotado: todas as ${n} páginas estão fixadas (pinned)."
+    }
+
+    obterPagina(idPagina: inteiro): Bin.Bytes {
+        se (idPagina < 0 ou idPagina >= isto.totalPaginas) {
+            falhar "ID de página fora dos limites: ${idPagina} (total=${isto.totalPaginas})."
+        }
+        se (isto.emMemoria) {
+            isto.acertosCache = isto.acertosCache + 1
+            retorna isto.paginasMemoria[idPagina]
+        }
+        var idx: inteiro = isto.buscarIndiceCache(idPagina)
+        se (idx >= 0) {
+            isto.acertosCache = isto.acertosCache + 1
+            isto.quadros[idx].usadoRecente = verdadeiro
+            retorna isto.quadros[idx].dados
+        }
+        isto.perdasCache = isto.perdasCache + 1
+        var dados: Bin.Bytes = isto.lerPaginaDisco(idPagina)
+        se (idPagina > 0 e !Fmt.verificarChecksumPagina(dados)) {
+            falhar "Corrupção detectada: checksum CRC32 inválido na página ${idPagina}."
+        }
+        var novoQ = QuadroCache(idPagina, dados)
+        se (isto.quadros.tamanho() < isto.maxPaginasCache) {
+            isto.quadros.adicionar(novoQ)
+        } senao {
+            var vitima: inteiro = isto.escolherVitimaCache()
+            isto.quadros[vitima] = novoQ
+        }
+        retorna dados
+    }
+
+    marcarSuja(idPagina: inteiro): vazio {
+        se (isto.emMemoria) {
+            se (idPagina > 0) {
+                Fmt.atualizarChecksumPagina(isto.paginasMemoria[idPagina])
+            }
+            retorna
+        }
+        var idx: inteiro = isto.buscarIndiceCache(idPagina)
+        se (idx >= 0) {
+            isto.quadros[idx].suja = verdadeiro
+            isto.quadros[idx].usadoRecente = verdadeiro
+        }
+    }
+
+    alocarPagina(tipoPag: inteiro): inteiro {
+        var idPag: inteiro = 0
+        se (isto.cabecaLivres > 0) {
+            idPag = isto.cabecaLivres
+            var pagLivre: Bin.Bytes = isto.obterPagina(idPag)
+            isto.cabecaLivres = Fmt.lerU32LE(pagLivre, 8)
+            var novaBuf: Bin.Bytes = Bin.Bytes.criar(4096)
+            Fmt.inicializarPagina(novaBuf, tipoPag, 0)
+            isto.substituirConteudoPagina(idPag, novaBuf)
+            isto.gravarCabecalho()
+            retorna idPag
+        }
+
+        idPag = isto.totalPaginas
+        isto.totalPaginas = isto.totalPaginas + 1
+        var buf: Bin.Bytes = Bin.Bytes.criar(4096)
+        Fmt.inicializarPagina(buf, tipoPag, 0)
+
+        se (isto.emMemoria) {
+            isto.paginasMemoria.adicionar(buf)
+            isto.gravarCabecalho()
+        } senao {
+            isto.escreverPaginaDisco(idPag, buf)
+            var novoQ = QuadroCache(idPag, buf)
+            se (isto.quadros.tamanho() < isto.maxPaginasCache) {
+                isto.quadros.adicionar(novoQ)
+            } senao {
+                var vitima: inteiro = isto.escolherVitimaCache()
+                isto.quadros[vitima] = novoQ
+            }
+            isto.gravarCabecalho()
+        }
+        retorna idPag
+    }
+
+    liberarPagina(idPagina: inteiro): vazio {
+        se (idPagina <= 1 ou idPagina >= isto.totalPaginas) { retorna }
+        var buf: Bin.Bytes = Bin.Bytes.criar(4096)
+        Fmt.inicializarPagina(buf, Fmt.tipoPaginaLivre(), isto.cabecaLivres)
+        isto.cabecaLivres = idPagina
+        isto.substituirConteudoPagina(idPagina, buf)
+        isto.gravarCabecalho()
+    }
+
+    substituirConteudoPagina(idPagina: inteiro, novaBuf: Bin.Bytes): vazio {
+        se (idPagina > 0) {
+            Fmt.atualizarChecksumPagina(novaBuf)
+        }
+        se (isto.emMemoria) {
+            enquanto (isto.paginasMemoria.tamanho() <= idPagina) {
+                isto.paginasMemoria.adicionar(Bin.Bytes.criar(4096))
+            }
+            isto.paginasMemoria[idPagina] = novaBuf
+            retorna
+        }
+        var idx: inteiro = isto.buscarIndiceCache(idPagina)
+        se (idx >= 0) {
+            isto.quadros[idx].dados = novaBuf
+            isto.quadros[idx].suja = verdadeiro
+            isto.quadros[idx].usadoRecente = verdadeiro
+        } senao {
+            var q = QuadroCache(idPagina, novaBuf)
+            q.suja = verdadeiro
+            se (isto.quadros.tamanho() < isto.maxPaginasCache) {
+                isto.quadros.adicionar(q)
+            } senao {
+                var vitima: inteiro = isto.escolherVitimaCache()
+                isto.quadros[vitima] = q
+            }
+        }
+    }
+
+    descarregarTodas(): vazio {
+        se (isto.emMemoria ou !isto.aberto) { retorna }
+        para (var i: inteiro = 0; i < isto.quadros.tamanho(); i = i + 1) {
+            var q: QuadroCache = isto.quadros[i]
+            se (q.suja) {
+                se (q.idPagina > 0) {
+                    Fmt.atualizarChecksumPagina(q.dados)
+                }
+                isto.escreverPaginaDisco(q.idPagina, q.dados)
+                q.suja = falso
+            }
+        }
+        isto.gravarCabecalho()
+        isto.sincronizarDisco()
+    }
+
+    fechar(): vazio {
+        se (!isto.aberto) { retorna }
+        se (!isto.emMemoria) {
+            isto.descarregarTodas()
+            Pio.PosixIO.flock(isto.fd, Pio.destravar())
+            Pio.PosixIO.close(isto.fd)
+            isto.fd = -1
+            isto.fp = 0
+        }
+        isto.quadros = []
+        isto.aberto = falso
+    }
+}

@@ -1,0 +1,206 @@
+modulo catalogo.persistencia_catalogo
+
+importar cgd.dados.binario como Bin
+importar paginas.formato como Fmt
+importar paginas.gerenciador_paginas como Pag
+importar catalogo.esquema como Cat
+importar tipos.valor como Val
+
+// Serializa e carrega o Catálogo completo em formato binário explícito (little-endian)
+// na cadeia de páginas iniciada em `pager.paginaCatalogo` (página 1).
+funcao anexarTextoLen(out: Bin.Bytes, s: texto): vazio {
+    var b: Bin.Bytes = Bin.Bytes.deTexto(s)
+    out.anexarU16LE(b.tamanho())
+    out.anexarBytes(b)
+}
+
+funcao lerTextoLen(buf: Bin.Bytes, posRef: inteiro[]): texto {
+    var pos: inteiro = posRef[0]
+    var tam: inteiro = buf.lerU16LE(pos)
+    pos = pos + 2
+    var s: texto = buf.fatiarTexto(pos, pos + tam)
+    posRef[0] = pos + tam
+    retorna s
+}
+
+funcao serializarCatalogo(cat: Cat.Catalogo): Bin.Bytes {
+    var out: Bin.Bytes = Bin.Bytes.criarReservado(256)
+    out.anexarU32LE(cat.versaoEsquema)
+    out.anexarU32LE(cat.proximoIdTabela)
+    out.anexarU32LE(cat.tabelas.tamanho())
+
+    para (var i: inteiro = 0; i < cat.tabelas.tamanho(); i = i + 1) {
+        var t: Cat.DefinicaoTabela = cat.tabelas[i]
+        anexarTextoLen(out, t.nome)
+        out.anexarU32LE(t.idTabela)
+        out.anexarU32LE(t.paginaRaizDados)
+        out.anexarU64LE(t.proximoAutoInc)
+        out.anexarU64LE(t.estimativaLinhas)
+
+        // Colunas
+        out.anexarU16LE(t.colunas.tamanho())
+        para (var c: inteiro = 0; c < t.colunas.tamanho(); c = c + 1) {
+            var col: Cat.DefinicaoColuna = t.colunas[c]
+            anexarTextoLen(out, col.nome)
+            out.anexarByte(Val.tipoDadoParaCodigo(col.tipoDado))
+            out.anexarU32LE(col.tamanho)
+            out.anexarU16LE(col.precisao)
+            out.anexarU16LE(col.escala)
+            var flags: inteiro = 0
+            se (col.permiteNulo) { flags = flags | 1 }
+            se (col.chavePrimaria) { flags = flags | 2 }
+            se (col.autoIncremento) { flags = flags | 4 }
+            se (col.unica) { flags = flags | 8 }
+            out.anexarByte(flags)
+            anexarTextoLen(out, col.referenciaTabela)
+            anexarTextoLen(out, col.referenciaColuna)
+        }
+
+        // Índices
+        out.anexarU16LE(t.indices.tamanho())
+        para (var k: inteiro = 0; k < t.indices.tamanho(); k = k + 1) {
+            var ind: Cat.DefinicaoIndice = t.indices[k]
+            anexarTextoLen(out, ind.nome)
+            out.anexarByte(ind.unico ? 1 : 0)
+            out.anexarU32LE(ind.paginaRaiz)
+            out.anexarU16LE(ind.colunas.tamanho())
+            para (var ic: inteiro = 0; ic < ind.colunas.tamanho(); ic = ic + 1) {
+                anexarTextoLen(out, ind.colunas[ic])
+            }
+        }
+    }
+    retorna out
+}
+
+funcao desserializarCatalogo(dados: Bin.Bytes): Cat.Catalogo {
+    var cat = Cat.Catalogo()
+    se (dados.tamanho() < 12) {
+        retorna cat
+    }
+    var posRef: inteiro[] = [0]
+    cat.versaoEsquema = dados.lerU32LE(0)
+    cat.proximoIdTabela = dados.lerU32LE(4)
+    var numTabelas: inteiro = dados.lerU32LE(8)
+    posRef[0] = 12
+
+    para (var i: inteiro = 0; i < numTabelas; i = i + 1) {
+        var nomeT: texto = lerTextoLen(dados, posRef)
+        var pos: inteiro = posRef[0]
+        var idTab: inteiro = dados.lerU32LE(pos)
+        var pagRaiz: inteiro = dados.lerU32LE(pos + 4)
+        var proxAuto: inteiro = dados.lerU64LE(pos + 8)
+        var estLinhas: inteiro = dados.lerU64LE(pos + 16)
+        var numCols: inteiro = dados.lerU16LE(pos + 24)
+        posRef[0] = pos + 26
+
+        var tab = Cat.DefinicaoTabela(nomeT, idTab, pagRaiz)
+        tab.proximoAutoInc = proxAuto
+        tab.estimativaLinhas = estLinhas
+
+        para (var c: inteiro = 0; c < numCols; c = c + 1) {
+            var nomeC: texto = lerTextoLen(dados, posRef)
+            var pC: inteiro = posRef[0]
+            var td: Val.TipoDado = Val.codigoParaTipoDado(dados.obter(pC))
+            var tam: inteiro = dados.lerU32LE(pC + 1)
+            var prec: inteiro = dados.lerU16LE(pC + 5)
+            var esc: inteiro = dados.lerU16LE(pC + 7)
+            var flags: inteiro = dados.obter(pC + 9)
+            posRef[0] = pC + 10
+            var refTab: texto = lerTextoLen(dados, posRef)
+            var refCol: texto = lerTextoLen(dados, posRef)
+
+            var col = Cat.DefinicaoColuna(
+                nomeC,
+                td,
+                tam,
+                (flags & 1) != 0,
+                (flags & 2) != 0,
+                (flags & 4) != 0,
+                (flags & 8) != 0
+            )
+            col.precisao = prec
+            col.escala = esc
+            col.referenciaTabela = refTab
+            col.referenciaColuna = refCol
+            tab.adicionarColuna(col)
+        }
+
+        var numInd: inteiro = dados.lerU16LE(posRef[0])
+        posRef[0] = posRef[0] + 2
+        para (var k: inteiro = 0; k < numInd; k = k + 1) {
+            var nomeI: texto = lerTextoLen(dados, posRef)
+            var pI: inteiro = posRef[0]
+            var unico: logico = dados.obter(pI) != 0
+            var pagRaizI: inteiro = dados.lerU32LE(pI + 1)
+            var numColsI: inteiro = dados.lerU16LE(pI + 5)
+            posRef[0] = pI + 7
+            var colsI: texto[] = []
+            para (var ic: inteiro = 0; ic < numColsI; ic = ic + 1) {
+                colsI.adicionar(lerTextoLen(dados, posRef))
+            }
+            tab.indices.adicionar(Cat.DefinicaoIndice(nomeI, nomeT, colsI, unico, pagRaizI))
+        }
+        cat.tabelas.adicionar(tab)
+    }
+    retorna cat
+}
+
+// Grava o catálogo na cadeia de páginas a partir de pager.paginaCatalogo (suporta catálogos multi-página).
+funcao salvarCatalogo(pager: Pag.GerenciadorPaginas, cat: Cat.Catalogo): vazio {
+    var payload: Bin.Bytes = serializarCatalogo(cat)
+    var totalBytes: inteiro = payload.tamanho()
+    var capacidadeUtil: inteiro = 4096 - 20 // 16 cabecalho + 4 bytes de comprimento/chunk
+    var pagAtual: inteiro = pager.paginaCatalogo
+    var offset: inteiro = 0
+
+    enquanto (verdadeiro) {
+        var bufAtual: Bin.Bytes = pager.obterPagina(pagAtual)
+        var proxExistente: inteiro = Fmt.lerU32LE(bufAtual, 8)
+        var restante: inteiro = totalBytes - offset
+        var bloco: inteiro = restante > capacidadeUtil ? capacidadeUtil : restante
+        var precisaProx: logico = (offset + bloco) < totalBytes
+
+        var proxPag: inteiro = 0
+        se (precisaProx) {
+            se (proxExistente > 0) {
+                proxPag = proxExistente
+            } senao {
+                proxPag = pager.alocarPagina(Fmt.tipoPaginaCatalogo())
+            }
+        }
+
+        var novaBuf: Bin.Bytes = Bin.Bytes.criar(4096)
+        Fmt.inicializarPagina(novaBuf, Fmt.tipoPaginaCatalogo(), proxPag)
+        Fmt.escreverU32LE(novaBuf, 16, bloco)
+        var i: inteiro = 0
+        enquanto (i < bloco) {
+            novaBuf.definir(20 + i, payload.obter(offset + i))
+            i = i + 1
+        }
+        pager.substituirConteudoPagina(pagAtual, novaBuf)
+        offset = offset + bloco
+        se (!precisaProx) {
+            sustar
+        }
+        pagAtual = proxPag
+    }
+    pager.versaoEsquema = cat.versaoEsquema
+    pager.gravarCabecalho()
+}
+
+funcao carregarCatalogo(pager: Pag.GerenciadorPaginas): Cat.Catalogo {
+    var acumulado: Bin.Bytes = Bin.Bytes.criarReservado(512)
+    var pagAtual: inteiro = pager.paginaCatalogo
+    enquanto (pagAtual > 0) {
+        var buf: Bin.Bytes = pager.obterPagina(pagAtual)
+        var bloco: inteiro = Fmt.lerU32LE(buf, 16)
+        se (bloco > 0 e bloco <= 4076) {
+            acumulado.anexarBytesFatia(buf, 20, bloco)
+        }
+        pagAtual = Fmt.lerU32LE(buf, 8)
+    }
+    se (acumulado.tamanho() == 0) {
+        retorna Cat.Catalogo()
+    }
+    retorna desserializarCatalogo(acumulado)
+}

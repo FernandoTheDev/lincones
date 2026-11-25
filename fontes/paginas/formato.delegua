@@ -1,0 +1,115 @@
+modulo paginas.formato
+
+importar cgd.dados.binario como Bin
+importar serializacao.crc32 como Crc
+
+// Constantes do formato binário .lce versão 1 (little-endian).
+funcao tamanhoPagina(): inteiro { retorna 4096 }
+funcao assinaturaMagica(): inteiro { retorna 826622796 } // 'L','C','E','1' em LE
+funcao versaoFormato(): inteiro { retorna 1 }
+funcao tamanhoCabecalhoPagina(): inteiro { retorna 16 }
+
+// Tipos de páginas no arquivo .lce
+funcao tipoPaginaCabecalho(): inteiro { retorna 1 }
+funcao tipoPaginaDados(): inteiro { retorna 2 }
+funcao tipoPaginaBTreeFolha(): inteiro { retorna 3 }
+funcao tipoPaginaBTreeInterna(): inteiro { retorna 4 }
+funcao tipoPaginaLivre(): inteiro { retorna 5 }
+funcao tipoPaginaCatalogo(): inteiro { retorna 6 }
+funcao tipoPaginaOverflow(): inteiro { retorna 7 }
+
+// Escreve inteiro 16-bit unsigned little-endian em Bytes.
+funcao escreverU16LE(buf: Bin.Bytes, pos: inteiro, valor: inteiro): vazio {
+    buf.definir(pos, valor & 255)
+    buf.definir(pos + 1, (valor >> 8) & 255)
+}
+
+funcao lerU16LE(buf: Bin.Bytes, pos: inteiro): inteiro {
+    retorna buf.lerU16LE(pos)
+}
+
+funcao escreverU32LE(buf: Bin.Bytes, pos: inteiro, valor: inteiro): vazio {
+    buf.definirU32LE(pos, valor & 4294967295)
+}
+
+funcao lerU32LE(buf: Bin.Bytes, pos: inteiro): inteiro {
+    retorna buf.lerU32LE(pos)
+}
+
+funcao escreverU64LE(buf: Bin.Bytes, pos: inteiro, valor: inteiro): vazio {
+    buf.definirU64LE(pos, valor)
+}
+
+funcao lerU64LE(buf: Bin.Bytes, pos: inteiro): inteiro {
+    retorna buf.lerU64LE(pos)
+}
+
+// Calcula CRC32 de página ignorando o campo checksum [12..15].
+funcao calcularChecksumPagina(buf: Bin.Bytes): inteiro {
+    var crc: inteiro = 4294967295
+    var i: inteiro = 0
+    enquanto (i < 12) {
+        crc = Crc.atualizarByteCrc32(crc, buf.obter(i))
+        i = i + 1
+    }
+    i = 16
+    enquanto (i < 4096) {
+        crc = Crc.atualizarByteCrc32(crc, buf.obter(i))
+        i = i + 1
+    }
+    retorna (crc ^ 4294967295) & 4294967295
+}
+
+funcao atualizarChecksumPagina(buf: Bin.Bytes): vazio {
+    var crc: inteiro = calcularChecksumPagina(buf)
+    escreverU32LE(buf, 12, crc)
+}
+
+funcao verificarChecksumPagina(buf: Bin.Bytes): logico {
+    var esperado: inteiro = lerU32LE(buf, 12)
+    var calculado: inteiro = calcularChecksumPagina(buf)
+    retorna esperado == calculado
+}
+
+// Inicializa página 0 (cabeçalho do arquivo .lce).
+funcao inicializarCabecalhoBanco(
+    buf: Bin.Bytes,
+    totalPaginas: inteiro,
+    cabecaLivres: inteiro,
+    paginaCatalogo: inteiro,
+    versaoEsquema: inteiro,
+    proximoTxId: inteiro
+): vazio {
+    escreverU32LE(buf, 0, assinaturaMagica())
+    escreverU32LE(buf, 4, versaoFormato())
+    escreverU32LE(buf, 8, tamanhoPagina())
+    escreverU32LE(buf, 12, totalPaginas)
+    escreverU32LE(buf, 16, cabecaLivres)
+    escreverU32LE(buf, 20, paginaCatalogo)
+    escreverU32LE(buf, 24, versaoEsquema)
+    escreverU32LE(buf, 28, proximoTxId)
+    escreverU32LE(buf, 32, 0)
+    var crc: inteiro = Crc.calcularCrc32Bytes(buf, 0, 36)
+    escreverU32LE(buf, 36, crc)
+}
+
+funcao validarCabecalhoBanco(buf: Bin.Bytes): logico {
+    se (buf.tamanho() < 4096) { retorna falso }
+    se (lerU32LE(buf, 0) != assinaturaMagica()) { retorna falso }
+    se (lerU32LE(buf, 4) != versaoFormato()) { retorna falso }
+    se (lerU32LE(buf, 8) != tamanhoPagina()) { retorna falso }
+    var crcLido: inteiro = lerU32LE(buf, 36)
+    var crcCalc: inteiro = Crc.calcularCrc32Bytes(buf, 0, 36)
+    retorna crcLido == crcCalc
+}
+
+// Inicializa página genérica (dados, B+ Tree, catálogo, livre).
+funcao inicializarPagina(buf: Bin.Bytes, tipoPag: inteiro, proximaPag: inteiro = 0): vazio {
+    buf.definir(0, tipoPag & 255)
+    buf.definir(1, 0)
+    escreverU16LE(buf, 2, 0)                  // numSlots = 0
+    escreverU16LE(buf, 4, 16)                 // livreInicio = 16
+    escreverU16LE(buf, 6, 4096)               // livreFim = 4096
+    escreverU32LE(buf, 8, proximaPag)         // proximaPagina
+    atualizarChecksumPagina(buf)
+}

@@ -1,0 +1,95 @@
+importar armazenamento.posix_io como Pio
+importar armazenamento.registros como Reg
+importar paginas.formato como Fmt
+importar paginas.gerenciador_paginas como Pag
+importar transacoes.wal como Wal
+importar concorrencia.controle_locks como Locks
+importar tipos.valor como Val
+
+funcao afirmar(condicao: logico, msg: texto): vazio {
+    se (!condicao) {
+        falhar "FALHA TRANSACOES/WAL: " + msg
+    }
+}
+
+const caminhoBanco: texto = "/tmp/lincones_teste_wal.lce"
+Pio.PosixIO.unlink(caminhoBanco)
+Pio.PosixIO.unlink(caminhoBanco + "-wal")
+
+// 1. Testar transação confirmada, rollback e savepoints
+var pager = Pag.GerenciadorPaginas(caminhoBanco, 16, verdadeiro)
+pager.abrir()
+var pagRaiz: inteiro = pager.alocarPagina(Fmt.tipoPaginaDados())
+var arm = Reg.ArmazenamentoTabela(pager)
+var wal = Wal.GerenciadorWal(caminhoBanco, verdadeiro)
+
+wal.iniciarTransacao(pager)
+arm.inserirRegistro(pagRaiz, [Val.Valor.deInteiro(1), Val.Valor.deTexto("Confirmado")])
+wal.criarPontoSalvamento("sp1", pager)
+arm.inserirRegistro(pagRaiz, [Val.Valor.deInteiro(2), Val.Valor.deTexto("DescartadoNoSavepoint")])
+afirmar(arm.varrerTabela(pagRaiz).tamanho() == 2, "Antes do rollback parcial devem haver 2 linhas")
+
+wal.reverterParaPonto("sp1", pager)
+afirmar(arm.varrerTabela(pagRaiz).tamanho() == 1, "Após REVERTER PARA sp1 deve restar 1 linha")
+wal.confirmarTransacao(pager)
+
+// 2. Testar rollback completo
+wal.iniciarTransacao(pager)
+arm.inserirRegistro(pagRaiz, [Val.Valor.deInteiro(3), Val.Valor.deTexto("Revertido")])
+wal.reverterTransacao(pager)
+afirmar(arm.varrerTabela(pagRaiz).tamanho() == 1, "Após REVERTER deve permanecer apenas 1 linha")
+
+// 3. Simular CRASH real após escrita no WAL (com COMMIT no WAL mas SEM descarregar no arquivo principal!)
+wal.iniciarTransacao(pager)
+arm.inserirRegistro(pagRaiz, [Val.Valor.deInteiro(4), Val.Valor.deTexto("RecuperadoDoWal")])
+// Grava WAL com COMMIT no disco, mas simula encerramento abrupto fechando o fd SEM descarregar o arquivo principal!
+wal.gravarWalNoDisco(pager, wal.txIdAtual, verdadeiro)
+Pio.PosixIO.flock(pager.fd, Pio.destravar())
+Pio.PosixIO.close(pager.fd)
+pager.aberto = falso
+
+// Reabrir o banco e executar recuperação do WAL!
+var pagerRec = Pag.GerenciadorPaginas(caminhoBanco, 16, verdadeiro)
+pagerRec.abrir()
+var walRec = Wal.GerenciadorWal(caminhoBanco, verdadeiro)
+var qtdRec: inteiro = walRec.recuperarDoWal(pagerRec)
+afirmar(qtdRec == 1, "Recuperação deve aplicar 1 transação confirmada do WAL, obtido " + texto(qtdRec))
+
+var armRec = Reg.ArmazenamentoTabela(pagerRec)
+var linhasRec = armRec.varrerTabela(pagRaiz)
+afirmar(linhasRec.tamanho() == 2, "Após recuperação do WAL devem existir 2 linhas, obtido " + texto(linhasRec.tamanho()))
+afirmar(linhasRec[1].valores[1].textoVal == "RecuperadoDoWal", "Linha 2 recuperada deve ser RecuperadoDoWal")
+
+// Recuperação repetida deve ser idempotente (0 transações pendentes)
+afirmar(walRec.recuperarDoWal(pagerRec) == 0, "Segunda recuperação deve ser idempotente (0)")
+
+// 4. Testar simulação de WAL incompleto (sem COMMIT -> deve ser descartado!)
+walRec.iniciarTransacao(pagerRec)
+armRec.inserirRegistro(pagRaiz, [Val.Valor.deInteiro(5), Val.Valor.deTexto("NaoConfirmadoCrash")])
+walRec.gravarWalNoDisco(pagerRec, walRec.txIdAtual, falso) // SEM COMMIT!
+Pio.PosixIO.flock(pagerRec.fd, Pio.destravar())
+Pio.PosixIO.close(pagerRec.fd)
+pagerRec.aberto = falso
+
+var pagerRec2 = Pag.GerenciadorPaginas(caminhoBanco, 16, verdadeiro)
+pagerRec2.abrir()
+var walRec2 = Wal.GerenciadorWal(caminhoBanco, verdadeiro)
+afirmar(walRec2.recuperarDoWal(pagerRec2) == 0, "WAL sem COMMIT não deve ser aplicado")
+var armRec2 = Reg.ArmazenamentoTabela(pagerRec2)
+afirmar(armRec2.varrerTabela(pagRaiz).tamanho() == 2, "Transação sem COMMIT deve ser descartada")
+pagerRec2.fechar()
+
+// 5. Teste do controle de concorrência (múltiplos leitores, escritor único)
+var lk = Locks.ControleLocks()
+afirmar(lk.adquirirLeitura(1) e lk.adquirirLeitura(2), "Múltiplos leitores devem ser permitidos")
+afirmar(!lk.adquirirEscrita(3), "Escritor deve ser bloqueado enquanto há leitores")
+lk.liberarLeitura()
+lk.liberarLeitura()
+afirmar(lk.adquirirEscrita(3), "Escritor deve adquirir lock após liberação dos leitores")
+afirmar(!lk.adquirirLeitura(1), "Leitor de outra conexão deve ser bloqueado durante escrita")
+lk.liberarEscrita(3)
+afirmar(lk.adquirirLeitura(1), "Leitor deve adquirir lock após liberação da escrita")
+
+Pio.PosixIO.unlink(caminhoBanco)
+Pio.PosixIO.unlink(caminhoBanco + "-wal")
+escreva("transacoes_wal_teste: OK")

@@ -1,0 +1,375 @@
+modulo armazenamento.registros
+
+importar cgd.dados.binario como Bin
+importar paginas.formato como Fmt
+importar paginas.gerenciador_paginas como Pag
+importar tipos.valor como Val
+
+// Identificador persistente e estável de registro (RID).
+classe IdRegistro {
+    idPagina: inteiro
+    idSlot: inteiro
+
+    construtor(idPagina: inteiro, idSlot: inteiro) {
+        isto.idPagina = idPagina
+        isto.idSlot = idSlot
+    }
+
+    chaveCompacta(): inteiro {
+        retorna (isto.idPagina * 65536) + isto.idSlot
+    }
+
+    estatico deChaveCompacta(chave: inteiro): IdRegistro {
+        var pag: inteiro = chave \ 65536
+        var slot: inteiro = chave % 65536
+        retorna IdRegistro(pag, slot)
+    }
+}
+
+classe RegistroLido {
+    rid: IdRegistro
+    valores: Val.Valor[]
+
+    construtor(rid: IdRegistro, valores: Val.Valor[]) {
+        isto.rid = rid
+        isto.valores = valores
+    }
+}
+
+// Serialização binária explícita (little-endian) de uma tupla Valor[].
+// Layout:
+//   [0..1] numColunas (u16)
+//   [2..2+bytesBitmap-1] bitmap de nulidade (bit = 1 significa NULO)
+//   Para cada coluna não nula:
+//     [tag: u8]
+//     - Inteiro: i64 LE (8 bytes)
+//     - Real: texto ASCII/UTF-8 com prefixo u16 (garante portabilidade sem UB de cast float->bytes)
+//     - Decimal: escala (u8) + mantissa i64 LE (8 bytes)
+//     - Logico: u8 (0 ou 1)
+//     - Texto/Caracteres/Binario/Data/Horario/Instante: len (u16) + bytes UTF-8
+funcao serializarTupla(valores: Val.Valor[]): Bin.Bytes {
+    var n: inteiro = valores.tamanho()
+    var bytesBitmap: inteiro = (n + 7) \ 8
+    var out: Bin.Bytes = Bin.Bytes.criarReservado(64)
+    out.anexarU16LE(n)
+
+    var bIdx: inteiro = 0
+    enquanto (bIdx < bytesBitmap) {
+        var mascara: inteiro = 0
+        var bit: inteiro = 0
+        enquanto (bit < 8) {
+            var colIdx: inteiro = bIdx * 8 + bit
+            se (colIdx < n e valores[colIdx].ehNulo()) {
+                mascara = mascara | (1 << bit)
+            }
+            bit = bit + 1
+        }
+        out.anexarByte(mascara)
+        bIdx = bIdx + 1
+    }
+
+    para (var i: inteiro = 0; i < n; i = i + 1) {
+        var v: Val.Valor = valores[i]
+        se (v.ehNulo()) {
+            continua
+        }
+        out.anexarByte(Val.tipoDadoParaCodigo(v.tipoDado))
+        escolha (v.tipoDado) {
+            caso Val.TipoDado.Inteiro:
+                out.anexarU64LE(v.inteiroVal)
+            caso Val.TipoDado.Decimal:
+                out.anexarByte(v.escala & 255)
+                out.anexarU64LE(v.inteiroVal)
+            caso Val.TipoDado.Logico:
+                out.anexarByte(v.logicoVal ? 1 : 0)
+            caso Val.TipoDado.Real:
+                var txtR: Bin.Bytes = Bin.Bytes.deTexto(texto(v.realVal))
+                out.anexarU16LE(txtR.tamanho())
+                out.anexarBytes(txtR)
+            padrao:
+                var txtB: Bin.Bytes = Bin.Bytes.deTexto(v.textoVal)
+                out.anexarU16LE(txtB.tamanho())
+                out.anexarBytes(txtB)
+        }
+    }
+    retorna out
+}
+
+funcao desserializarTupla(buf: Bin.Bytes, inicio: inteiro, comprimento: inteiro): Val.Valor[] {
+    var pos: inteiro = inicio
+    var limite: inteiro = inicio + comprimento
+    se (comprimento < 2 ou limite > buf.tamanho()) {
+        falhar "Registro binário truncado ou inválido."
+    }
+    var n: inteiro = buf.lerU16LE(pos)
+    pos = pos + 2
+    var bytesBitmap: inteiro = (n + 7) \ 8
+    var inicioBitmap: inteiro = pos
+    pos = pos + bytesBitmap
+    se (pos > limite) {
+        falhar "Bitmap de nulidade fora dos limites do registro."
+    }
+
+    var valores: Val.Valor[] = []
+    para (var i: inteiro = 0; i < n; i = i + 1) {
+        var bVal: inteiro = buf.obter(inicioBitmap + (i \ 8))
+        var ehNulo: logico = ((bVal >> (i % 8)) & 1) != 0
+        se (ehNulo) {
+            valores.adicionar(Val.Valor.nuloVal())
+            continua
+        }
+        se (pos >= limite) {
+            falhar "Fim inesperado ao desserializar coluna ${i}."
+        }
+        var tag: inteiro = buf.obter(pos)
+        pos = pos + 1
+        var td: Val.TipoDado = Val.codigoParaTipoDado(tag)
+        escolha (td) {
+            caso Val.TipoDado.Inteiro:
+                var iv: inteiro = buf.lerU64LE(pos)
+                pos = pos + 8
+                valores.adicionar(Val.Valor.deInteiro(iv))
+            caso Val.TipoDado.Decimal:
+                var esc: inteiro = buf.obter(pos)
+                pos = pos + 1
+                var mv: inteiro = buf.lerU64LE(pos)
+                pos = pos + 8
+                valores.adicionar(Val.Valor.deDecimal(mv, esc))
+            caso Val.TipoDado.Logico:
+                var lv: logico = buf.obter(pos) != 0
+                pos = pos + 1
+                valores.adicionar(Val.Valor.deLogico(lv))
+            caso Val.TipoDado.Real:
+                var lenR: inteiro = buf.lerU16LE(pos)
+                pos = pos + 2
+                var sR: texto = buf.fatiarTexto(pos, pos + lenR)
+                pos = pos + lenR
+                valores.adicionar(Val.Valor.deReal(real(sR)))
+            padrao:
+                var lenT: inteiro = buf.lerU16LE(pos)
+                pos = pos + 2
+                var sT: texto = buf.fatiarTexto(pos, pos + lenT)
+                pos = pos + lenT
+                valores.adicionar(Val.Valor(td, 0, 0.0, falso, sT, 0))
+        }
+    }
+    retorna valores
+}
+
+// Operações sobre Slotted Pages (diretório de slots a partir do byte 16, cada slot = 4 bytes: offset u16 + len u16).
+// Slot excluído tem len == 0 e offset == 0 (preservando os IDs de slots dos demais registros).
+funcao espacoLivrePagina(buf: Bin.Bytes): inteiro {
+    var livreIni: inteiro = Fmt.lerU16LE(buf, 4)
+    var livreFim: inteiro = Fmt.lerU16LE(buf, 6)
+    retorna livreFim - livreIni
+}
+
+// Compacta registros ativos no topo da página preservando os índices de slot (RIDs estáveis).
+funcao compactarPagina(buf: Bin.Bytes): vazio {
+    var numSlots: inteiro = Fmt.lerU16LE(buf, 2)
+    var tipoPag: inteiro = buf.obter(0)
+    var proxPag: inteiro = Fmt.lerU32LE(buf, 8)
+    var nova: Bin.Bytes = Bin.Bytes.criar(4096)
+    Fmt.inicializarPagina(nova, tipoPag, proxPag)
+    Fmt.escreverU16LE(nova, 2, numSlots)
+    Fmt.escreverU16LE(nova, 4, 16 + numSlots * 4)
+
+    var cursorFim: inteiro = 4096
+    para (var s: inteiro = 0; s < numSlots; s = s + 1) {
+        var posSlot: inteiro = 16 + s * 4
+        var off: inteiro = Fmt.lerU16LE(buf, posSlot)
+        var tam: inteiro = Fmt.lerU16LE(buf, posSlot + 2)
+        se (tam > 0 e off > 0) {
+            cursorFim = cursorFim - tam
+            var k: inteiro = 0
+            enquanto (k < tam) {
+                nova.definir(cursorFim + k, buf.obter(off + k))
+                k = k + 1
+            }
+            Fmt.escreverU16LE(nova, posSlot, cursorFim)
+            Fmt.escreverU16LE(nova, posSlot + 2, tam)
+        } senao {
+            Fmt.escreverU16LE(nova, posSlot, 0)
+            Fmt.escreverU16LE(nova, posSlot + 2, 0)
+        }
+    }
+    Fmt.escreverU16LE(nova, 6, cursorFim)
+    var idx: inteiro = 0
+    enquanto (idx < 4096) {
+        buf.definir(idx, nova.obter(idx))
+        idx = idx + 1
+    }
+    Fmt.atualizarChecksumPagina(buf)
+}
+
+// Insere payload binário em uma Slotted Page; retorna idSlot ou -1 se não couber.
+funcao inserirNaPagina(buf: Bin.Bytes, payload: Bin.Bytes): inteiro {
+    var tamRec: inteiro = payload.tamanho()
+    se (tamRec > 4000) {
+        falhar "Registro excede tamanho máximo de página (${tamRec} > 4000 bytes)."
+    }
+    var numSlots: inteiro = Fmt.lerU16LE(buf, 2)
+    var livreIni: inteiro = Fmt.lerU16LE(buf, 4)
+    var livreFim: inteiro = Fmt.lerU16LE(buf, 6)
+
+    // Tenta reutilizar slot livre primeiro
+    var slotLivre: inteiro = -1
+    para (var s: inteiro = 0; s < numSlots; s = s + 1) {
+        var tamS: inteiro = Fmt.lerU16LE(buf, 16 + s * 4 + 2)
+        se (tamS == 0) {
+            slotLivre = s
+            sustar
+        }
+    }
+
+    var necessario: inteiro = slotLivre >= 0 ? tamRec : (tamRec + 4)
+    se ((livreFim - livreIni) < necessario) {
+        compactarPagina(buf)
+        livreIni = Fmt.lerU16LE(buf, 4)
+        livreFim = Fmt.lerU16LE(buf, 6)
+        se ((livreFim - livreIni) < necessario) {
+            retorna -1
+        }
+    }
+
+    var novoOff: inteiro = livreFim - tamRec
+    var i: inteiro = 0
+    enquanto (i < tamRec) {
+        buf.definir(novoOff + i, payload.obter(i))
+        i = i + 1
+    }
+
+    var idSlot: inteiro = slotLivre
+    se (idSlot < 0) {
+        idSlot = numSlots
+        numSlots = numSlots + 1
+        livreIni = livreIni + 4
+        Fmt.escreverU16LE(buf, 2, numSlots)
+        Fmt.escreverU16LE(buf, 4, livreIni)
+    }
+    var posSlot: inteiro = 16 + idSlot * 4
+    Fmt.escreverU16LE(buf, posSlot, novoOff)
+    Fmt.escreverU16LE(buf, posSlot + 2, tamRec)
+    Fmt.escreverU16LE(buf, 6, novoOff)
+    Fmt.atualizarChecksumPagina(buf)
+    retorna idSlot
+}
+
+// Gerenciador de Heap de Tabela (cadeia de Slotted Pages encadeadas por proximaPagina).
+classe ArmazenamentoTabela {
+    pager: Pag.GerenciadorPaginas
+
+    construtor(pager: Pag.GerenciadorPaginas) {
+        isto.pager = pager
+    }
+
+    inserirRegistro(paginaRaiz: inteiro, valores: Val.Valor[]): IdRegistro {
+        var payload: Bin.Bytes = serializarTupla(valores)
+        var pagAtual: inteiro = paginaRaiz
+        enquanto (verdadeiro) {
+            var buf: Bin.Bytes = isto.pager.obterPagina(pagAtual)
+            var slot: inteiro = inserirNaPagina(buf, payload)
+            se (slot >= 0) {
+                isto.pager.marcarSuja(pagAtual)
+                retorna IdRegistro(pagAtual, slot)
+            }
+            var prox: inteiro = Fmt.lerU32LE(buf, 8)
+            se (prox == 0) {
+                var novaPag: inteiro = isto.pager.alocarPagina(Fmt.tipoPaginaDados())
+                // Recarrega pagAtual caso tenha sido despejada pelo cache
+                var bufAtual: Bin.Bytes = isto.pager.obterPagina(pagAtual)
+                Fmt.escreverU32LE(bufAtual, 8, novaPag)
+                Fmt.atualizarChecksumPagina(bufAtual)
+                isto.pager.marcarSuja(pagAtual)
+                pagAtual = novaPag
+            } senao {
+                pagAtual = prox
+            }
+        }
+        retorna IdRegistro(0, 0)
+    }
+
+    lerRegistro(rid: IdRegistro): qualquer {
+        var buf: Bin.Bytes = isto.pager.obterPagina(rid.idPagina)
+        var numSlots: inteiro = Fmt.lerU16LE(buf, 2)
+        se (rid.idSlot < 0 ou rid.idSlot >= numSlots) {
+            retorna nulo
+        }
+        var posSlot: inteiro = 16 + rid.idSlot * 4
+        var off: inteiro = Fmt.lerU16LE(buf, posSlot)
+        var tam: inteiro = Fmt.lerU16LE(buf, posSlot + 2)
+        se (tam == 0 ou off == 0) {
+            retorna nulo
+        }
+        retorna desserializarTupla(buf, off, tam)
+    }
+
+    excluirRegistro(rid: IdRegistro): logico {
+        var buf: Bin.Bytes = isto.pager.obterPagina(rid.idPagina)
+        var numSlots: inteiro = Fmt.lerU16LE(buf, 2)
+        se (rid.idSlot < 0 ou rid.idSlot >= numSlots) {
+            retorna falso
+        }
+        var posSlot: inteiro = 16 + rid.idSlot * 4
+        var tam: inteiro = Fmt.lerU16LE(buf, posSlot + 2)
+        se (tam == 0) {
+            retorna falso
+        }
+        Fmt.escreverU16LE(buf, posSlot, 0)
+        Fmt.escreverU16LE(buf, posSlot + 2, 0)
+        Fmt.atualizarChecksumPagina(buf)
+        isto.pager.marcarSuja(rid.idPagina)
+        retorna verdadeiro
+    }
+
+    atualizarRegistro(paginaRaiz: inteiro, rid: IdRegistro, novosValores: Val.Valor[]): IdRegistro {
+        var payload: Bin.Bytes = serializarTupla(novosValores)
+        var buf: Bin.Bytes = isto.pager.obterPagina(rid.idPagina)
+        var posSlot: inteiro = 16 + rid.idSlot * 4
+        var offAtual: inteiro = Fmt.lerU16LE(buf, posSlot)
+        var tamAtual: inteiro = Fmt.lerU16LE(buf, posSlot + 2)
+        // Se couber in-place, substitui mantendo o mesmo RID!
+        se (payload.tamanho() <= tamAtual e offAtual > 0) {
+            var i: inteiro = 0
+            enquanto (i < payload.tamanho()) {
+                buf.definir(offAtual + i, payload.obter(i))
+                i = i + 1
+            }
+            Fmt.escreverU16LE(buf, posSlot + 2, payload.tamanho())
+            Fmt.atualizarChecksumPagina(buf)
+            isto.pager.marcarSuja(rid.idPagina)
+            retorna rid
+        }
+        // Caso contrário, libera o slot e tenta reinserir na mesma página após compactar; se não couber, realoca.
+        Fmt.escreverU16LE(buf, posSlot, 0)
+        Fmt.escreverU16LE(buf, posSlot + 2, 0)
+        isto.pager.marcarSuja(rid.idPagina)
+        var novoSlot: inteiro = inserirNaPagina(buf, payload)
+        se (novoSlot >= 0) {
+            isto.pager.marcarSuja(rid.idPagina)
+            retorna IdRegistro(rid.idPagina, novoSlot)
+        }
+        retorna isto.inserirRegistro(paginaRaiz, novosValores)
+    }
+
+    varrerTabela(paginaRaiz: inteiro): RegistroLido[] {
+        var resultado: RegistroLido[] = []
+        var pagAtual: inteiro = paginaRaiz
+        enquanto (pagAtual > 0) {
+            var buf: Bin.Bytes = isto.pager.obterPagina(pagAtual)
+            var numSlots: inteiro = Fmt.lerU16LE(buf, 2)
+            var prox: inteiro = Fmt.lerU32LE(buf, 8)
+            para (var s: inteiro = 0; s < numSlots; s = s + 1) {
+                var posSlot: inteiro = 16 + s * 4
+                var off: inteiro = Fmt.lerU16LE(buf, posSlot)
+                var tam: inteiro = Fmt.lerU16LE(buf, posSlot + 2)
+                se (tam > 0 e off > 0) {
+                    var vals: Val.Valor[] = desserializarTupla(buf, off, tam)
+                    resultado.adicionar(RegistroLido(IdRegistro(pagAtual, s), vals))
+                }
+            }
+            pagAtual = prox
+        }
+        retorna resultado
+    }
+}

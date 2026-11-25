@@ -1,0 +1,78 @@
+importar armazenamento.posix_io como Pio
+importar armazenamento.registros como Reg
+importar paginas.gerenciador_paginas como Pag
+importar indices.arvore_bmais como BTree
+importar catalogo.esquema como Cat
+importar catalogo.persistencia_catalogo como PersCat
+importar tipos.valor como Val
+
+funcao afirmar(condicao: logico, msg: texto): vazio {
+    se (!condicao) {
+        falhar "FALHA INDICES/CATALOGO: " + msg
+    }
+}
+
+const caminhoBanco: texto = "/tmp/lincones_teste_btree.lce"
+Pio.PosixIO.unlink(caminhoBanco)
+
+var pager = Pag.GerenciadorPaginas(caminhoBanco, 16, verdadeiro)
+pager.abrir()
+
+// 1. Teste de B+ Tree persistente com múltiplos splits (ordem 8 para forçar 3+ níveis)
+var arvore = BTree.ArvoreBMais(pager, 0, verdadeiro, 8, 8)
+
+// Inserção fora de ordem determinística (120 chaves)
+para (var i: inteiro = 1; i <= 120; i = i + 1) {
+    var chaveNum: inteiro = ((i * 37) % 120) + 1
+    arvore.inserir(Val.Valor.deInteiro(chaveNum), Reg.IdRegistro(10, chaveNum))
+}
+
+var errosInt: texto[] = arvore.verificarIntegridade()
+afirmar(errosInt.tamanho() == 0, "Integridade da B+ Tree falhou: " + texto(errosInt))
+
+// Busca exata em todas as 120 chaves
+para (var k: inteiro = 1; k <= 120; k = k + 1) {
+    var rids = arvore.buscarExato(Val.Valor.deInteiro(k))
+    afirmar(rids.tamanho() == 1 e rids[0].idSlot == k, "Busca exata falhou para chave " + texto(k))
+}
+
+// Busca por intervalo [25, 40] -> 16 itens
+var intervalo = arvore.buscarIntervalo(Val.Valor.deInteiro(25), verdadeiro, Val.Valor.deInteiro(40), verdadeiro)
+afirmar(intervalo.tamanho() == 16, "Esperados 16 itens no intervalo [25..40], obtidos " + texto(intervalo.tamanho()))
+
+// Exclusão de 20 chaves e nova verificação estrutural
+para (var d: inteiro = 1; d <= 20; d = d + 1) {
+    afirmar(arvore.excluir(Val.Valor.deInteiro(d), Reg.IdRegistro(10, d)), "Exclusão falhou para " + texto(d))
+}
+afirmar(arvore.buscarExato(Val.Valor.deInteiro(5)).tamanho() == 0, "Chave 5 excluída não deve ser encontrada")
+afirmar(arvore.listarOrdenado().tamanho() == 100, "Devem restar 100 chaves na B+ Tree")
+afirmar(arvore.verificarIntegridade().tamanho() == 0, "Integridade após exclusões falhou")
+
+// 2. Persistência do Catálogo + Raiz da B+ Tree após fechar e reabrir
+var cat = Cat.Catalogo()
+var tab = Cat.DefinicaoTabela("produtos", 1, 2)
+tab.adicionarColuna(Cat.DefinicaoColuna("id", Val.TipoDado.Inteiro, 0, falso, verdadeiro, verdadeiro, verdadeiro))
+tab.adicionarColuna(Cat.DefinicaoColuna("preco", Val.TipoDado.Decimal, 0, falso, falso, falso, falso))
+tab.indices.adicionar(Cat.DefinicaoIndice("pk_produtos", "produtos", ["id"], verdadeiro, arvore.paginaRaiz))
+cat.registrarTabela(tab)
+PersCat.salvarCatalogo(pager, cat)
+var raizSalva: inteiro = arvore.paginaRaiz
+pager.fechar()
+
+// Reabrir e validar tudo do disco!
+var pager2 = Pag.GerenciadorPaginas(caminhoBanco, 16, verdadeiro)
+pager2.abrir()
+var cat2 = PersCat.carregarCatalogo(pager2)
+afirmar(cat2.existeTabela("produtos"), "Tabela produtos deve persistir no catálogo")
+var tab2 = cat2.obterTabela("produtos")
+afirmar(tab2.indices.tamanho() == 1 e tab2.indices[0].paginaRaiz == raizSalva, "Índice pk_produtos deve preservar página raiz")
+
+var arvore2 = BTree.ArvoreBMais(pager2, raizSalva, verdadeiro, 8, 8)
+afirmar(arvore2.listarOrdenado().tamanho() == 100, "B+ Tree reaberta deve conter 100 chaves")
+var r99 = arvore2.buscarExato(Val.Valor.deInteiro(99))
+afirmar(r99.tamanho() == 1 e r99[0].idSlot == 99, "Chave 99 deve persistir na B+ Tree")
+afirmar(arvore2.verificarIntegridade().tamanho() == 0, "Integridade da B+ Tree reaberta falhou")
+
+pager2.fechar()
+Pio.PosixIO.unlink(caminhoBanco)
+escreva("indices_e_catalogo_teste: OK")
