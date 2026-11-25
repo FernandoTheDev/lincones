@@ -1,0 +1,347 @@
+modulo ast.nos
+
+importar diagnosticos.diagnostico como Diag
+importar tipos.valor como Val
+
+enum TipoExpressao {
+    Literal,
+    Coluna,
+    Parametro,
+    Unaria,
+    Binaria,
+    Chamada,
+    EhNulo,
+    Entre,
+    EmLista,
+    Asterisco
+}
+
+enum TipoComando {
+    CriarTabela,
+    AlterarTabela,
+    RemoverEntidade,
+    Inserir,
+    Selecionar,
+    Atualizar,
+    Excluir,
+    CriarIndice,
+    RemoverIndice,
+    Transacao,
+    Explicar
+}
+
+enum TipoJuncao {
+    Interna,
+    Esquerda,
+    Direita,
+    Completa,
+    Cruzada
+}
+
+enum TipoAlteracao {
+    AdicionarColuna,
+    AlterarColuna,
+    RemoverColuna,
+    RenomearColuna,
+    AdicionarChaveEstrangeira,
+    AdicionarUnica,
+    RemoverRestricao
+}
+
+enum TipoTransacao {
+    Iniciar,
+    Confirmar,
+    Reverter,
+    PontoSalvamento,
+    ReverterPara,
+    LiberarPonto
+}
+
+// Nó unificado de expressão com discriminante concreto.
+classe Expressao {
+    tipoExpr: TipoExpressao
+    intervalo: Diag.Intervalo
+    // Literal
+    valorLiteral: Val.Valor
+    // Coluna / Chamada / Parametro
+    tabelaRef: texto
+    nome: texto
+    indiceParametro: inteiro
+    // Operadores Unario / Binario / EhNulo / Entre / EmLista
+    operador: texto
+    negado: logico
+    esquerda: qualquer
+    direita: qualquer
+    terceiro: qualquer
+    argumentos: Expressao[]
+    distinto: logico
+
+    construtor(tipoExpr: TipoExpressao, intervalo: Diag.Intervalo) {
+        isto.tipoExpr = tipoExpr
+        isto.intervalo = intervalo
+        isto.valorLiteral = Val.Valor.nuloVal()
+        isto.tabelaRef = ""
+        isto.nome = ""
+        isto.indiceParametro = 0
+        isto.operador = ""
+        isto.negado = falso
+        isto.esquerda = nulo
+        isto.direita = nulo
+        isto.terceiro = nulo
+        isto.argumentos = []
+        isto.distinto = falso
+    }
+
+    estatico literal(v: Val.Valor, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.Literal, intervalo)
+        expr.valorLiteral = v
+        retorna expr
+    }
+
+    estatico coluna(tabelaRef: texto, nome: texto, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.Coluna, intervalo)
+        expr.tabelaRef = tabelaRef
+        expr.nome = nome
+        retorna expr
+    }
+
+    estatico parametro(nome: texto, indice: inteiro, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.Parametro, intervalo)
+        expr.nome = nome
+        expr.indiceParametro = indice
+        retorna expr
+    }
+
+    estatico unaria(op: texto, operando: Expressao, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.Unaria, intervalo)
+        expr.operador = op
+        expr.esquerda = operando
+        retorna expr
+    }
+
+    estatico binaria(op: texto, esq: Expressao, dir: Expressao, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.Binaria, intervalo)
+        expr.operador = op
+        expr.esquerda = esq
+        expr.direita = dir
+        retorna expr
+    }
+
+    estatico chamada(nome: texto, args: Expressao[], distinto: logico, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.Chamada, intervalo)
+        expr.nome = nome
+        expr.argumentos = args
+        expr.distinto = distinto
+        retorna expr
+    }
+
+    estatico ehNulo(alvo: Expressao, negado: logico, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.EhNulo, intervalo)
+        expr.esquerda = alvo
+        expr.negado = negado
+        retorna expr
+    }
+
+    estatico entre(alvo: Expressao, inicio: Expressao, fim: Expressao, negado: logico, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.Entre, intervalo)
+        expr.esquerda = alvo
+        expr.direita = inicio
+        expr.terceiro = fim
+        expr.negado = negado
+        retorna expr
+    }
+
+    estatico emLista(alvo: Expressao, itens: Expressao[], negado: logico, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.EmLista, intervalo)
+        expr.esquerda = alvo
+        expr.argumentos = itens
+        expr.negado = negado
+        retorna expr
+    }
+
+    estatico asterisco(tabelaRef: texto, intervalo: Diag.Intervalo): Expressao {
+        var expr = Expressao(TipoExpressao.Asterisco, intervalo)
+        expr.tabelaRef = tabelaRef
+        retorna expr
+    }
+}
+
+// Definição de coluna em CRIAR TABELA / ALTERAR TABELA.
+classe ColunaAst {
+    nome: texto
+    tipoDado: Val.TipoDado
+    tamanho: inteiro
+    precisao: inteiro
+    escala: inteiro
+    permiteNulo: logico
+    chavePrimaria: logico
+    autoIncremento: logico
+    unica: logico
+    valorPadrao: qualquer
+    referenciaTabela: texto
+    referenciaColuna: texto
+    intervalo: Diag.Intervalo
+
+    construtor(nome: texto, tipoDado: Val.TipoDado, intervalo: Diag.Intervalo) {
+        isto.nome = nome
+        isto.tipoDado = tipoDado
+        isto.tamanho = 0
+        isto.precisao = 0
+        isto.escala = 0
+        isto.permiteNulo = verdadeiro
+        isto.chavePrimaria = falso
+        isto.autoIncremento = falso
+        isto.unica = falso
+        isto.valorPadrao = nulo
+        isto.referenciaTabela = ""
+        isto.referenciaColuna = ""
+        isto.intervalo = intervalo
+    }
+}
+
+classe ItemSelecao {
+    expressao: Expressao
+    apelido: texto
+
+    construtor(expressao: Expressao, apelido: texto = "") {
+        isto.expressao = expressao
+        isto.apelido = apelido
+    }
+}
+
+classe ItemOrdenacao {
+    expressao: Expressao
+    descendente: logico
+
+    construtor(expressao: Expressao, descendente: logico = falso) {
+        isto.expressao = expressao
+        isto.descendente = descendente
+    }
+}
+
+classe ClausulaJuncao {
+    tipoJuncao: TipoJuncao
+    tabela: texto
+    apelido: texto
+    condicao: qualquer
+
+    construtor(tipoJuncao: TipoJuncao, tabela: texto, apelido: texto, condicao: qualquer) {
+        isto.tipoJuncao = tipoJuncao
+        isto.tabela = tabela
+        isto.apelido = apelido
+        isto.condicao = condicao
+    }
+}
+
+classe AtribuicaoAst {
+    coluna: texto
+    valor: Expressao
+    intervalo: Diag.Intervalo
+
+    construtor(coluna: texto, valor: Expressao, intervalo: Diag.Intervalo) {
+        isto.coluna = coluna
+        isto.valor = valor
+        isto.intervalo = intervalo
+    }
+}
+
+classe OperacaoAlteracaoAst {
+    tipoAlteracao: TipoAlteracao
+    nomeColuna: texto
+    novoNomeColuna: texto
+    colunaDef: qualquer
+    nomeRestricao: texto
+    tabelaRef: texto
+    colunaRef: texto
+    intervalo: Diag.Intervalo
+
+    construtor(tipoAlteracao: TipoAlteracao, intervalo: Diag.Intervalo) {
+        isto.tipoAlteracao = tipoAlteracao
+        isto.nomeColuna = ""
+        isto.novoNomeColuna = ""
+        isto.colunaDef = nulo
+        isto.nomeRestricao = ""
+        isto.tabelaRef = ""
+        isto.colunaRef = ""
+        isto.intervalo = intervalo
+    }
+}
+
+// Nó unificado de comando LinConEs.
+classe Comando {
+    tipoCmd: TipoComando
+    intervalo: Diag.Intervalo
+
+    // Identificadores comuns
+    tabela: texto
+    apelidoTabela: texto
+    entidadeTipo: texto
+    seNaoExistir: logico
+    seExistir: logico
+
+    // CRIAR TABELA
+    colunasDef: ColunaAst[]
+
+    // ALTERAR TABELA
+    operacoesAlteracao: OperacaoAlteracaoAst[]
+
+    // INSERIR
+    colunasNomes: texto[]
+    linhasValores: qualquer[]
+
+    // SELECIONAR
+    distinto: logico
+    itensSelecao: ItemSelecao[]
+    juncoes: ClausulaJuncao[]
+    condicaoOnde: qualquer
+    agruparPor: Expressao[]
+    condicaoTendo: qualquer
+    ordenarPor: ItemOrdenacao[]
+    limite: inteiro
+    deslocamento: inteiro
+
+    // ATUALIZAR
+    atribuicoes: AtribuicaoAst[]
+
+    // INDICE
+    nomeIndice: texto
+    indiceUnico: logico
+
+    // TRANSACAO
+    tipoTransacao: TipoTransacao
+    nomePonto: texto
+
+    // EXPLICAR
+    analisarExecucao: logico
+    comandoAlvo: qualquer
+
+    construtor(tipoCmd: TipoComando, intervalo: Diag.Intervalo) {
+        isto.tipoCmd = tipoCmd
+        isto.intervalo = intervalo
+        isto.tabela = ""
+        isto.apelidoTabela = ""
+        isto.entidadeTipo = "TABELA"
+        isto.seNaoExistir = falso
+        isto.seExistir = falso
+        isto.colunasDef = []
+        isto.operacoesAlteracao = []
+        isto.colunasNomes = []
+        isto.linhasValores = []
+        isto.distinto = falso
+        isto.itensSelecao = []
+        isto.juncoes = []
+        isto.condicaoOnde = nulo
+        isto.agruparPor = []
+        isto.condicaoTendo = nulo
+        isto.ordenarPor = []
+        isto.limite = -1
+        isto.deslocamento = 0
+        isto.atribuicoes = []
+        isto.nomeIndice = ""
+        isto.indiceUnico = falso
+        isto.tipoTransacao = TipoTransacao.Iniciar
+        isto.nomePonto = ""
+        isto.analisarExecucao = falso
+        isto.comandoAlvo = nulo
+    }
+}

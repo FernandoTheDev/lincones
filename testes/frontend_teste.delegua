@@ -1,0 +1,55 @@
+importar sintatico.parser como Par
+importar ast.nos como Ast
+importar semantico.analisador como Sem
+importar catalogo.esquema como Cat
+importar tipos.valor como Val
+importar diagnosticos.diagnostico como Diag
+
+funcao afirmar(condicao: logico, msg: texto): vazio {
+    se (!condicao) {
+        falhar "FALHA FRONTEND: " + msg
+    }
+}
+
+// 1. Teste de todos os comandos oficiais em modo estrito
+const scriptOficial: texto = "CRIAR TABELA SE NÃO EXISTIR clientes (ID INTEIRO NAO NULO CHAVE PRIMARIA AUTO INCREMENTO, NOME TEXTO(100) NAO NULO, IDADE INTEIRO NAO NULO, EMAIL TEXTO(255) NULO, ATIVO LOGICO NAO NULO); INSERIR EM clientes (NOME, IDADE, ATIVO, EMAIL) VALORES (\"Pernalonga\", 18, VERDADEIRO, \"p@wb.com\"); SELECIONAR NOME, EMAIL DE clientes ONDE IDADE >= 18 E ATIVO = VERDADEIRO; ATUALIZAR clientes DEFINIR NOME = ?, IDADE = :idade ONDE ID = 1; EXCLUIR DE clientes ONDE ID = 1; EXCLUIR EM clientes ONDE ID = 2; EXCLUIR clientes ONDE ID = 3; ALTERAR TABELA clientes ADICIONAR COLUNA telefone CARACTERES(20); ALTERAR TABELA clientes RENOMEAR COLUNA telefone PARA celular; ALTERAR TABELA clientes REMOVER COLUNA celular; REMOVER TABELA clientes;"
+
+var resOficial = Par.AnalisadorSintatico.analisarCodigo(scriptOficial, "oficial.lincones", verdadeiro)
+afirmar(!resOficial.diagnosticos.temErros(), "Script oficial não deveria gerar erros: " + resOficial.diagnosticos.formatarTodos())
+afirmar(resOficial.comandos.tamanho() == 11, "Esperados 11 comandos oficiais, obtidos " + texto(resOficial.comandos.tamanho()))
+afirmar(resOficial.comandos[0].tipoCmd == Ast.TipoComando.CriarTabela, "Cmd 0 deve ser CriarTabela")
+afirmar(resOficial.comandos[0].seNaoExistir, "Cmd 0 deve preservar SE NÃO EXISTIR")
+afirmar(resOficial.comandos[0].colunasDef.tamanho() == 5, "Cmd 0 deve ter 5 colunas")
+afirmar(resOficial.comandos[0].colunasDef[0].autoIncremento, "ID deve ter AUTO INCREMENTO")
+
+// 2. Teste de extensões (junção, agrupamento, ordenação, limite, índice, transação, explicar, comentários)
+const scriptExt: texto = "-- Consulta completa\nSELECIONAR DISTINTO c.nome, CONTAR(p.id) COMO total DE clientes COMO c JUNCAO ESQUERDA pedidos COMO p EM c.id = p.cliente_id ONDE c.idade ENTRE 18 E 65 E (c.ativo = VERDADEIRO OU c.email EH NAO NULO) AGRUPAR POR c.nome TENDO CONTAR(p.id) > 1 ORDENAR POR total DECRESCENTE LIMITE 10 DESLOCAMENTO 5; CRIAR UNICO INDICE idx_email EM clientes (email); INICIAR TRANSACAO; PONTO DE SALVAMENTO p1; REVERTER PARA p1; CONFIRMAR; EXPLICAR ANALISAR SELECIONAR * DE clientes;"
+
+var resExt = Par.AnalisadorSintatico.analisarCodigo(scriptExt, "ext.lincones", falso)
+afirmar(!resExt.diagnosticos.temErros(), "Script estendido não deveria gerar erros: " + resExt.diagnosticos.formatarTodos())
+afirmar(resExt.comandos.tamanho() == 7, "Esperados 7 comandos estendidos, obtidos " + texto(resExt.comandos.tamanho()))
+afirmar(resExt.comandos[0].distinto, "SELECIONAR deve ter DISTINTO")
+afirmar(resExt.comandos[0].juncoes.tamanho() == 1, "SELECIONAR deve ter 1 junção")
+afirmar(resExt.comandos[0].limite == 10 e resExt.comandos[0].deslocamento == 5, "LIMITE/DESLOCAMENTO incorretos")
+afirmar(resExt.comandos[1].tipoCmd == Ast.TipoComando.CriarIndice e resExt.comandos[1].indiceUnico, "CRIAR UNICO INDICE incorreto")
+afirmar(resExt.comandos[6].tipoCmd == Ast.TipoComando.Explicar e resExt.comandos[6].analisarExecucao, "EXPLICAR ANALISAR incorreto")
+
+// 3. Teste semântico com catálogo (detecção de erros reais)
+var cat = Cat.Catalogo()
+var tab = Cat.DefinicaoTabela("clientes", 1, 2)
+tab.adicionarColuna(Cat.DefinicaoColuna("id", Val.TipoDado.Inteiro, 0, falso, verdadeiro, verdadeiro, verdadeiro))
+tab.adicionarColuna(Cat.DefinicaoColuna("nome", Val.TipoDado.Texto, 100, falso, falso, falso, falso))
+cat.registrarTabela(tab)
+
+var resErr = Par.AnalisadorSintatico.analisarCodigo("INSERIR EM clientes (id, inexistente) VALORES (1);", "sem.lincones", falso)
+var diagSem = Diag.ColetorDiagnosticos()
+var analSem = Sem.AnalisadorSemantico(cat, diagSem)
+analSem.validarComando(resErr.comandos[0])
+afirmar(diagSem.temErros(), "Analisador semântico deve detectar aridade divergente e coluna inexistente")
+afirmar(diagSem.quantidadeErros >= 2, "Esperados ao menos 2 erros semânticos")
+
+// 4. Proteção contra entradas inválidas / aninhamento sem loop infinito
+var resInv = Par.AnalisadorSintatico.analisarCodigo("@@@ 'texto nao fechado", "invalido.lincones", falso)
+afirmar(resInv.diagnosticos.temErros(), "Entrada inválida deve produzir diagnósticos sem travar")
+
+escreva("frontend_teste: OK")

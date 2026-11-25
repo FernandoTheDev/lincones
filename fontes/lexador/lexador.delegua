@@ -1,0 +1,467 @@
+modulo lexador.lexador
+
+importar diagnosticos.diagnostico como Diag
+importar lexador.token como Tok
+
+funcao ehDigito(ch: texto): logico {
+    retorna ch >= "0" e ch <= "9"
+}
+
+funcao ehEspaco(ch: texto): logico {
+    retorna ch == " " ou ch == "\t" ou ch == "\r" ou ch == "\n"
+}
+
+funcao ehInicioIdentificador(ch: texto): logico {
+    se ((ch >= "a" e ch <= "z") ou (ch >= "A" e ch <= "Z") ou ch == "_") {
+        retorna verdadeiro
+    }
+    // Letras acentuadas do português (UTF-8)
+    var acentos: texto = "áÁàÀâÂãÃéÉêÊíÍóÓôÔõÕúÚçÇ"
+    retorna acentos.inclui(ch)
+}
+
+funcao ehParteIdentificador(ch: texto): logico {
+    retorna ehInicioIdentificador(ch) ou ehDigito(ch)
+}
+
+// Classificação de palavras reservadas (case-insensitive, aceitando variantes acentuadas oficiais).
+funcao classificarPalavraChave(lexemaMinusculo: texto, modoEstrito: logico): Tok.TipoToken {
+    // Palavras oficiais da especificação LinConEs / lincones-js
+    escolha (lexemaMinusculo) {
+        caso "adicionar": retorna Tok.TipoToken.Adicionar
+        caso "agrupar": retorna Tok.TipoToken.Agrupar
+        caso "alterar": retorna Tok.TipoToken.Alterar
+        caso "atualizar": retorna Tok.TipoToken.Atualizar
+        caso "auto": retorna Tok.TipoToken.Auto
+        caso "caracteres": retorna Tok.TipoToken.Caracteres
+        caso "chave": retorna Tok.TipoToken.Chave
+        caso "coluna": retorna Tok.TipoToken.Coluna
+        caso "criar": retorna Tok.TipoToken.Criar
+        caso "de": retorna Tok.TipoToken.De
+        caso "definir": retorna Tok.TipoToken.Definir
+        caso "distinto": retorna Tok.TipoToken.Distinto
+        caso "e": retorna Tok.TipoToken.E
+        caso "em": retorna Tok.TipoToken.Em
+        caso "entre": retorna Tok.TipoToken.Entre
+        caso "estrangeira": retorna Tok.TipoToken.Estrangeira
+        caso "excluir": retorna Tok.TipoToken.Excluir
+        caso "existir": retorna Tok.TipoToken.Existir
+        caso "falso": retorna Tok.TipoToken.Falso
+        caso "identidade": retorna Tok.TipoToken.Identidade
+        caso "incremento": retorna Tok.TipoToken.Incremento
+        caso "inserir": retorna Tok.TipoToken.Inserir
+        caso "inteiro": retorna Tok.TipoToken.Inteiro
+        caso "logico": retorna Tok.TipoToken.Logico
+        caso "lógico": retorna Tok.TipoToken.Logico
+        caso "media": retorna Tok.TipoToken.Media
+        caso "média": retorna Tok.TipoToken.Media
+        caso "nao": retorna Tok.TipoToken.Nao
+        caso "não": retorna Tok.TipoToken.Nao
+        caso "nulo": retorna Tok.TipoToken.Nulo
+        caso "numero": retorna Tok.TipoToken.Numero
+        caso "número": retorna Tok.TipoToken.Numero
+        caso "onde": retorna Tok.TipoToken.Onde
+        caso "ordenar": retorna Tok.TipoToken.Ordenar
+        caso "padrao": retorna Tok.TipoToken.Padrao
+        caso "padrão": retorna Tok.TipoToken.Padrao
+        caso "para": retorna Tok.TipoToken.Para
+        caso "por": retorna Tok.TipoToken.Por
+        caso "primaria": retorna Tok.TipoToken.Primaria
+        caso "primária": retorna Tok.TipoToken.Primaria
+        caso "referencia": retorna Tok.TipoToken.Referencia
+        caso "referência": retorna Tok.TipoToken.Referencia
+        caso "remover": retorna Tok.TipoToken.Remover
+        caso "renomear": retorna Tok.TipoToken.Renomear
+        caso "restricao": retorna Tok.TipoToken.Restricao
+        caso "restrição": retorna Tok.TipoToken.Restricao
+        caso "se": retorna Tok.TipoToken.Se
+        caso "selecionar": retorna Tok.TipoToken.Selecionar
+        caso "tabela": retorna Tok.TipoToken.Tabela
+        caso "texto": retorna Tok.TipoToken.Texto
+        caso "unica": retorna Tok.TipoToken.Unica
+        caso "única": retorna Tok.TipoToken.Unica
+        caso "valores": retorna Tok.TipoToken.Valores
+        caso "verdadeiro": retorna Tok.TipoToken.Verdadeiro
+        caso "visao": retorna Tok.TipoToken.Visao
+        caso "visão": retorna Tok.TipoToken.Visao
+    }
+
+    se (modoEstrito) {
+        retorna Tok.TipoToken.Identificador
+    }
+
+    // Extensões documentadas do LinConEs Nativo
+    escolha (lexemaMinusculo) {
+        caso "ou": retorna Tok.TipoToken.Ou
+        caso "como": retorna Tok.TipoToken.Como
+        caso "eh": retorna Tok.TipoToken.Eh
+        caso "é": retorna Tok.TipoToken.Eh
+        caso "limite": retorna Tok.TipoToken.Limite
+        caso "deslocamento": retorna Tok.TipoToken.Deslocamento
+        caso "crescente": retorna Tok.TipoToken.Crescente
+        caso "asc": retorna Tok.TipoToken.Crescente
+        caso "decrescente": retorna Tok.TipoToken.Decrescente
+        caso "desc": retorna Tok.TipoToken.Decrescente
+        caso "tendo": retorna Tok.TipoToken.Tendo
+        caso "juncao": retorna Tok.TipoToken.Juncao
+        caso "junção": retorna Tok.TipoToken.Juncao
+        caso "juntar": retorna Tok.TipoToken.Juncao
+        caso "interna": retorna Tok.TipoToken.Interna
+        caso "esquerda": retorna Tok.TipoToken.Esquerda
+        caso "direita": retorna Tok.TipoToken.Direita
+        caso "completa": retorna Tok.TipoToken.Completa
+        caso "cruzada": retorna Tok.TipoToken.Cruzada
+        caso "indice": retorna Tok.TipoToken.Indice
+        caso "índice": retorna Tok.TipoToken.Indice
+        caso "unico": retorna Tok.TipoToken.Unico
+        caso "único": retorna Tok.TipoToken.Unico
+        caso "real": retorna Tok.TipoToken.Real
+        caso "decimal": retorna Tok.TipoToken.Decimal
+        caso "binario": retorna Tok.TipoToken.Binario
+        caso "binário": retorna Tok.TipoToken.Binario
+        caso "data": retorna Tok.TipoToken.Data
+        caso "horario": retorna Tok.TipoToken.Horario
+        caso "horário": retorna Tok.TipoToken.Horario
+        caso "instante": retorna Tok.TipoToken.Instante
+        caso "iniciar": retorna Tok.TipoToken.Iniciar
+        caso "transacao": retorna Tok.TipoToken.Transacao
+        caso "transação": retorna Tok.TipoToken.Transacao
+        caso "confirmar": retorna Tok.TipoToken.Confirmar
+        caso "reverter": retorna Tok.TipoToken.Reverter
+        caso "ponto": retorna Tok.TipoToken.Ponto
+        caso "salvamento": retorna Tok.TipoToken.Salvamento
+        caso "liberar": retorna Tok.TipoToken.Liberar
+        caso "explicar": retorna Tok.TipoToken.Explicar
+        caso "analisar": retorna Tok.TipoToken.Analisar
+        caso "verificar": retorna Tok.TipoToken.Verificar
+        caso "uniao": retorna Tok.TipoToken.Uniao
+        caso "união": retorna Tok.TipoToken.Uniao
+        caso "intersecao": retorna Tok.TipoToken.Intersecao
+        caso "interseção": retorna Tok.TipoToken.Intersecao
+        caso "diferenca": retorna Tok.TipoToken.Diferenca
+        caso "diferença": retorna Tok.TipoToken.Diferenca
+        caso "caso": retorna Tok.TipoToken.Caso
+        caso "quando": retorna Tok.TipoToken.Quando
+        caso "entao": retorna Tok.TipoToken.Entao
+        caso "então": retorna Tok.TipoToken.Entao
+        caso "senao": retorna Tok.TipoToken.Senao
+        caso "senão": retorna Tok.TipoToken.Senao
+        caso "fim": retorna Tok.TipoToken.Fim
+    }
+    retorna Tok.TipoToken.Identificador
+}
+
+classe ResultadoLexico {
+    tokens: Tok.Token[]
+    diagnosticos: Diag.ColetorDiagnosticos
+
+    construtor(tokens: Tok.Token[], diagnosticos: Diag.ColetorDiagnosticos) {
+        isto.tokens = tokens
+        isto.diagnosticos = diagnosticos
+    }
+}
+
+classe Lexador {
+    codigo: texto
+    arquivo: texto
+    modoEstrito: logico
+    limiteTokens: inteiro
+    indice: inteiro
+    comprimento: inteiro
+    linha: inteiro
+    coluna: inteiro
+    diagnosticos: Diag.ColetorDiagnosticos
+
+    construtor(codigo: texto, arquivo: texto = "", modoEstrito: logico = falso, limiteTokens: inteiro = 100000) {
+        isto.codigo = codigo
+        isto.arquivo = arquivo
+        isto.modoEstrito = modoEstrito
+        isto.limiteTokens = limiteTokens
+        isto.indice = 0
+        isto.comprimento = codigo.tamanho()
+        isto.linha = 1
+        isto.coluna = 1
+        isto.diagnosticos = Diag.ColetorDiagnosticos()
+    }
+
+    fim(): logico {
+        retorna isto.indice >= isto.comprimento
+    }
+
+    atual(): texto {
+        se (isto.indice >= isto.comprimento) {
+            retorna ""
+        }
+        retorna isto.codigo[isto.indice]
+    }
+
+    proximo(): texto {
+        se (isto.indice + 1 >= isto.comprimento) {
+            retorna ""
+        }
+        retorna isto.codigo[isto.indice + 1]
+    }
+
+    avancar(): texto {
+        se (isto.indice >= isto.comprimento) {
+            retorna ""
+        }
+        var ch: texto = isto.codigo[isto.indice]
+        isto.indice = isto.indice + 1
+        se (ch == "\n") {
+            isto.linha = isto.linha + 1
+            isto.coluna = 1
+        } senao {
+            isto.coluna = isto.coluna + 1
+        }
+        retorna ch
+    }
+
+    pularEspacosEComentarios(): vazio {
+        enquanto (!isto.fim()) {
+            var ch: texto = isto.atual()
+            se (ehEspaco(ch)) {
+                isto.avancar()
+            } senao se (!isto.modoEstrito e ch == "-" e isto.proximo() == "-") {
+                // Comentário de linha --
+                isto.avancar()
+                isto.avancar()
+                enquanto (!isto.fim() e isto.atual() != "\n") {
+                    isto.avancar()
+                }
+            } senao se (!isto.modoEstrito e ch == "/" e isto.proximo() == "*") {
+                // Comentário de bloco /* ... */
+                var linIni: inteiro = isto.linha
+                var colIni: inteiro = isto.coluna
+                var desIni: inteiro = isto.indice
+                isto.avancar()
+                isto.avancar()
+                var fechou: logico = falso
+                enquanto (!isto.fim()) {
+                    se (isto.atual() == "*" e isto.proximo() == "/") {
+                        isto.avancar()
+                        isto.avancar()
+                        fechou = verdadeiro
+                        sustar
+                    }
+                    isto.avancar()
+                }
+                se (!fechou) {
+                    isto.diagnosticos.erro(
+                        "LEX002",
+                        "lexador",
+                        "Comentário de bloco não finalizado.",
+                        Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)
+                    )
+                }
+            } senao {
+                sustar
+            }
+        }
+    }
+
+    lerTexto(delimitador: texto): Tok.Token {
+        var linIni: inteiro = isto.linha
+        var colIni: inteiro = isto.coluna
+        var desIni: inteiro = isto.indice
+        isto.avancar() // consome delimitador inicial
+        var valor: texto = ""
+        var fechou: logico = falso
+        enquanto (!isto.fim()) {
+            var ch: texto = isto.avancar()
+            se (ch == delimitador) {
+                // Suporte a escape duplicado SQL ('') ou ("")
+                se (!isto.fim() e isto.atual() == delimitador) {
+                    isto.avancar()
+                    valor = valor + delimitador
+                } senao {
+                    fechou = verdadeiro
+                    sustar
+                }
+            } senao se (ch == "\\" e !isto.fim()) {
+                var esc: texto = isto.avancar()
+                escolha (esc) {
+                    caso "n": valor = valor + "\n"
+                    caso "t": valor = valor + "\t"
+                    caso "r": valor = valor + "\r"
+                    caso "\\": valor = valor + "\\"
+                    caso "\"": valor = valor + "\""
+                    caso "'": valor = valor + "'"
+                    padrao: valor = valor + esc
+                }
+            } senao {
+                valor = valor + ch
+            }
+        }
+        se (!fechou) {
+            isto.diagnosticos.erro(
+                "LEX001",
+                "lexador",
+                "Literal textual não finalizado.",
+                Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)
+            )
+        }
+        retorna Tok.Token(
+            Tok.TipoToken.LiteralTexto,
+            valor,
+            Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)
+        )
+    }
+
+    lerIdentificadorDelimitado(): Tok.Token {
+        var linIni: inteiro = isto.linha
+        var colIni: inteiro = isto.coluna
+        var desIni: inteiro = isto.indice
+        isto.avancar() // consome `
+        var nome: texto = ""
+        var fechou: logico = falso
+        enquanto (!isto.fim()) {
+            var ch: texto = isto.avancar()
+            se (ch == "`") {
+                se (!isto.fim() e isto.atual() == "`") {
+                    isto.avancar()
+                    nome = nome + "`"
+                } senao {
+                    fechou = verdadeiro
+                    sustar
+                }
+            } senao {
+                nome = nome + ch
+            }
+        }
+        se (!fechou) {
+            isto.diagnosticos.erro(
+                "LEX003",
+                "lexador",
+                "Identificador delimitado não finalizado.",
+                Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)
+            )
+        }
+        retorna Tok.Token(
+            Tok.TipoToken.Identificador,
+            nome,
+            Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)
+        )
+    }
+
+    lerNumero(): Tok.Token {
+        var linIni: inteiro = isto.linha
+        var colIni: inteiro = isto.coluna
+        var desIni: inteiro = isto.indice
+        var lex: texto = ""
+        var ehReal: logico = falso
+        enquanto (!isto.fim() e ehDigito(isto.atual())) {
+            lex = lex + isto.avancar()
+        }
+        se (!isto.fim() e isto.atual() == "." e ehDigito(isto.proximo())) {
+            ehReal = verdadeiro
+            lex = lex + isto.avancar()
+            enquanto (!isto.fim() e ehDigito(isto.atual())) {
+                lex = lex + isto.avancar()
+            }
+        }
+        var tt: Tok.TipoToken = ehReal ? Tok.TipoToken.LiteralReal : Tok.TipoToken.LiteralInteiro
+        retorna Tok.Token(tt, lex, Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice))
+    }
+
+    lerIdentificadorOuPalavra(): Tok.Token {
+        var linIni: inteiro = isto.linha
+        var colIni: inteiro = isto.coluna
+        var desIni: inteiro = isto.indice
+        var lex: texto = ""
+        enquanto (!isto.fim() e ehParteIdentificador(isto.atual())) {
+            lex = lex + isto.avancar()
+        }
+        var tt: Tok.TipoToken = classificarPalavraChave(lex.minusculo(), isto.modoEstrito)
+        retorna Tok.Token(tt, lex, Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice))
+    }
+
+    mapear(): ResultadoLexico {
+        var tokens: Tok.Token[] = []
+        enquanto (!isto.fim()) {
+            isto.pularEspacosEComentarios()
+            se (isto.fim()) {
+                sustar
+            }
+            se (tokens.tamanho() >= isto.limiteTokens) {
+                isto.diagnosticos.erro(
+                    "LEX004",
+                    "lexador",
+                    "Limite máximo de tokens excedido (${isto.limiteTokens}).",
+                    Diag.Intervalo(isto.arquivo, isto.linha, isto.coluna, isto.indice, isto.indice)
+                )
+                sustar
+            }
+
+            var linIni: inteiro = isto.linha
+            var colIni: inteiro = isto.coluna
+            var desIni: inteiro = isto.indice
+            var ch: texto = isto.atual()
+
+            se (ch == "\"" ou ch == "'") {
+                tokens.adicionar(isto.lerTexto(ch))
+            } senao se (ch == "`") {
+                tokens.adicionar(isto.lerIdentificadorDelimitado())
+            } senao se (ehDigito(ch)) {
+                tokens.adicionar(isto.lerNumero())
+            } senao se (ehInicioIdentificador(ch)) {
+                tokens.adicionar(isto.lerIdentificadorOuPalavra())
+            } senao {
+                isto.avancar()
+                escolha (ch) {
+                    caso "(": tokens.adicionar(Tok.Token(Tok.TipoToken.ParenteseEsq, "(", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso ")": tokens.adicionar(Tok.Token(Tok.TipoToken.ParenteseDir, ")", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso ",": tokens.adicionar(Tok.Token(Tok.TipoToken.Virgula, ",", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso ";": tokens.adicionar(Tok.Token(Tok.TipoToken.PontoVirgula, ";", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso ".": tokens.adicionar(Tok.Token(Tok.TipoToken.PontoSimbolo, ".", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso "*": tokens.adicionar(Tok.Token(Tok.TipoToken.Asterisco, "*", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso "+": tokens.adicionar(Tok.Token(Tok.TipoToken.Mais, "+", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso "-": tokens.adicionar(Tok.Token(Tok.TipoToken.Menos, "-", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso "/": tokens.adicionar(Tok.Token(Tok.TipoToken.Barra, "/", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso "%": tokens.adicionar(Tok.Token(Tok.TipoToken.Porcento, "%", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso "=": tokens.adicionar(Tok.Token(Tok.TipoToken.Igual, "=", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso ":": tokens.adicionar(Tok.Token(Tok.TipoToken.DoisPontos, ":", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso "?": tokens.adicionar(Tok.Token(Tok.TipoToken.Interrogacao, "?", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                    caso "!":
+                        se (!isto.fim() e isto.atual() == "=") {
+                            isto.avancar()
+                            tokens.adicionar(Tok.Token(Tok.TipoToken.Diferente, "!=", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                        } senao {
+                            isto.diagnosticos.erro("LEX005", "lexador", "Caractere inesperado: '!'.", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice))
+                        }
+                    caso ">":
+                        se (!isto.fim() e isto.atual() == "=") {
+                            isto.avancar()
+                            tokens.adicionar(Tok.Token(Tok.TipoToken.MaiorIgual, ">=", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                        } senao {
+                            tokens.adicionar(Tok.Token(Tok.TipoToken.Maior, ">", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                        }
+                    caso "<":
+                        se (!isto.fim() e isto.atual() == "=") {
+                            isto.avancar()
+                            tokens.adicionar(Tok.Token(Tok.TipoToken.MenorIgual, "<=", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                        } senao se (!isto.fim() e isto.atual() == ">") {
+                            isto.avancar()
+                            tokens.adicionar(Tok.Token(Tok.TipoToken.Diferente, "<>", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                        } senao {
+                            tokens.adicionar(Tok.Token(Tok.TipoToken.Menor, "<", Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)))
+                        }
+                    padrao:
+                        isto.diagnosticos.erro(
+                            "LEX005",
+                            "lexador",
+                            "Caractere inesperado: '${ch}'.",
+                            Diag.Intervalo(isto.arquivo, linIni, colIni, desIni, isto.indice)
+                        )
+                }
+            }
+        }
+
+        tokens.adicionar(Tok.Token(
+            Tok.TipoToken.FimArquivo,
+            "",
+            Diag.Intervalo(isto.arquivo, isto.linha, isto.coluna, isto.indice, isto.indice)
+        ))
+        retorna ResultadoLexico(tokens, isto.diagnosticos)
+    }
+}

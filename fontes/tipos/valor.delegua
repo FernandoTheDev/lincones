@@ -1,0 +1,317 @@
+modulo tipos.valor
+
+// Tipos relacionais independentes de dialeto.
+enum TipoDado {
+    Nulo,
+    Inteiro,
+    Real,
+    Decimal,
+    Logico,
+    Texto,
+    Caracteres,
+    Binario,
+    Data,
+    Horario,
+    Instante
+}
+
+// Lógica ternária (Verdadeiro, Falso, Desconhecido/NULO).
+enum TriLogico {
+    Falso,
+    Verdadeiro,
+    Desconhecido
+}
+
+funcao nomeTipoDado(t: TipoDado): texto {
+    escolha (t) {
+        caso TipoDado.Nulo: retorna "NULO"
+        caso TipoDado.Inteiro: retorna "INTEIRO"
+        caso TipoDado.Real: retorna "REAL"
+        caso TipoDado.Decimal: retorna "DECIMAL"
+        caso TipoDado.Logico: retorna "LOGICO"
+        caso TipoDado.Texto: retorna "TEXTO"
+        caso TipoDado.Caracteres: retorna "CARACTERES"
+        caso TipoDado.Binario: retorna "BINARIO"
+        caso TipoDado.Data: retorna "DATA"
+        caso TipoDado.Horario: retorna "HORARIO"
+        caso TipoDado.Instante: retorna "INSTANTE"
+    }
+    retorna "DESCONHECIDO"
+}
+
+funcao tipoDadoParaCodigo(t: TipoDado): inteiro {
+    escolha (t) {
+        caso TipoDado.Nulo: retorna 0
+        caso TipoDado.Inteiro: retorna 1
+        caso TipoDado.Real: retorna 2
+        caso TipoDado.Decimal: retorna 3
+        caso TipoDado.Logico: retorna 4
+        caso TipoDado.Texto: retorna 5
+        caso TipoDado.Caracteres: retorna 6
+        caso TipoDado.Binario: retorna 7
+        caso TipoDado.Data: retorna 8
+        caso TipoDado.Horario: retorna 9
+        caso TipoDado.Instante: retorna 10
+    }
+    retorna 0
+}
+
+funcao codigoParaTipoDado(codigo: inteiro): TipoDado {
+    escolha (codigo) {
+        caso 0: retorna TipoDado.Nulo
+        caso 1: retorna TipoDado.Inteiro
+        caso 2: retorna TipoDado.Real
+        caso 3: retorna TipoDado.Decimal
+        caso 4: retorna TipoDado.Logico
+        caso 5: retorna TipoDado.Texto
+        caso 6: retorna TipoDado.Caracteres
+        caso 7: retorna TipoDado.Binario
+        caso 8: retorna TipoDado.Data
+        caso 9: retorna TipoDado.Horario
+        caso 10: retorna TipoDado.Instante
+    }
+    retorna TipoDado.Nulo
+}
+
+funcao potenciaDez(escala: inteiro): inteiro {
+    var r: inteiro = 1
+    var i: inteiro = 0
+    enquanto (i < escala) {
+        r = r * 10
+        i = i + 1
+    }
+    retorna r
+}
+
+// Valor relacional tipado.
+// Para TipoDado.Decimal, `inteiroVal` armazena o mantissa escalado e `escala` armazena casas decimais (0..9).
+// Para TipoDado.Data/Horario/Instante, `inteiroVal` armazena dias/segundos/microssegundos e `textoVal` forma ISO opcional.
+classe Valor {
+    tipoDado: TipoDado
+    inteiroVal: inteiro
+    realVal: real
+    logicoVal: logico
+    textoVal: texto
+    escala: inteiro
+
+    construtor(
+        tipoDado: TipoDado,
+        inteiroVal: inteiro = 0,
+        realVal: real = 0.0,
+        logicoVal: logico = falso,
+        textoVal: texto = "",
+        escala: inteiro = 0
+    ) {
+        isto.tipoDado = tipoDado
+        isto.inteiroVal = inteiroVal
+        isto.realVal = realVal
+        isto.logicoVal = logicoVal
+        isto.textoVal = textoVal
+        isto.escala = escala
+    }
+
+    estatico nuloVal(): Valor {
+        retorna Valor(TipoDado.Nulo)
+    }
+
+    estatico deInteiro(v: inteiro): Valor {
+        retorna Valor(TipoDado.Inteiro, v, 0.0, falso, "", 0)
+    }
+
+    estatico deReal(v: real): Valor {
+        retorna Valor(TipoDado.Real, 0, v, falso, "", 0)
+    }
+
+    estatico deDecimal(escalado: inteiro, escala: inteiro): Valor {
+        retorna Valor(TipoDado.Decimal, escalado, 0.0, falso, "", escala)
+    }
+
+    estatico deLogico(v: logico): Valor {
+        retorna Valor(TipoDado.Logico, v ? 1 : 0, 0.0, v, "", 0)
+    }
+
+    estatico deTexto(v: texto): Valor {
+        retorna Valor(TipoDado.Texto, 0, 0.0, falso, v, 0)
+    }
+
+    estatico deCaracteres(v: texto): Valor {
+        retorna Valor(TipoDado.Caracteres, 0, 0.0, falso, v, 0)
+    }
+
+    estatico deBinarioHex(hex: texto): Valor {
+        retorna Valor(TipoDado.Binario, 0, 0.0, falso, hex, 0)
+    }
+
+    estatico deData(iso: texto): Valor {
+        retorna Valor(TipoDado.Data, 0, 0.0, falso, iso, 0)
+    }
+
+    ehNulo(): logico {
+        retorna isto.tipoDado == TipoDado.Nulo
+    }
+
+    ehNumerico(): logico {
+        retorna isto.tipoDado == TipoDado.Inteiro ou isto.tipoDado == TipoDado.Real ou isto.tipoDado == TipoDado.Decimal
+    }
+
+    comoReal(): real {
+        se (isto.tipoDado == TipoDado.Real) {
+            retorna isto.realVal
+        }
+        se (isto.tipoDado == TipoDado.Inteiro) {
+            retorna real(isto.inteiroVal)
+        }
+        se (isto.tipoDado == TipoDado.Decimal) {
+            var fator: real = real(potenciaDez(isto.escala))
+            retorna real(isto.inteiroVal) / fator
+        }
+        se (isto.tipoDado == TipoDado.Logico) {
+            retorna isto.logicoVal ? 1.0 : 0.0
+        }
+        retorna 0.0
+    }
+
+    paraTexto(): texto {
+        escolha (isto.tipoDado) {
+            caso TipoDado.Nulo: retorna "NULO"
+            caso TipoDado.Inteiro: retorna texto(isto.inteiroVal)
+            caso TipoDado.Real: retorna texto(isto.realVal)
+            caso TipoDado.Decimal:
+                se (isto.escala <= 0) {
+                    retorna texto(isto.inteiroVal)
+                }
+                var neg: logico = isto.inteiroVal < 0
+                var absVal: inteiro = neg ? -isto.inteiroVal : isto.inteiroVal
+                var div: inteiro = potenciaDez(isto.escala)
+                var parteInt: inteiro = absVal \ div
+                var parteFrac: inteiro = absVal % div
+                var fracStr: texto = texto(parteFrac)
+                enquanto (fracStr.tamanho() < isto.escala) {
+                    fracStr = "0" + fracStr
+                }
+                var prefixo: texto = neg ? "-" : ""
+                retorna "${prefixo}${parteInt}.${fracStr}"
+            caso TipoDado.Logico: retorna isto.logicoVal ? "VERDADEIRO" : "FALSO"
+            caso TipoDado.Texto: retorna isto.textoVal
+            caso TipoDado.Caracteres: retorna isto.textoVal
+            caso TipoDado.Binario: retorna "0x" + isto.textoVal
+            caso TipoDado.Data: retorna isto.textoVal
+            caso TipoDado.Horario: retorna isto.textoVal
+            caso TipoDado.Instante: retorna isto.textoVal
+        }
+        retorna ""
+    }
+}
+
+// Comparação total para ordenação interna (B+ Tree e ORDENAR POR):
+// NULO ordena antes de valores não nulos (NULLS FIRST determinístico).
+funcao compararTotal(a: Valor, b: Valor): inteiro {
+    se (a.ehNulo() e b.ehNulo()) {
+        retorna 0
+    }
+    se (a.ehNulo()) {
+        retorna -1
+    }
+    se (b.ehNulo()) {
+        retorna 1
+    }
+    se (a.tipoDado == TipoDado.Inteiro e b.tipoDado == TipoDado.Inteiro) {
+        se (a.inteiroVal < b.inteiroVal) { retorna -1 }
+        se (a.inteiroVal > b.inteiroVal) { retorna 1 }
+        retorna 0
+    }
+    se (a.tipoDado == TipoDado.Decimal e b.tipoDado == TipoDado.Decimal) {
+        var esc: inteiro = a.escala >= b.escala ? a.escala : b.escala
+        var va: inteiro = a.inteiroVal * potenciaDez(esc - a.escala)
+        var vb: inteiro = b.inteiroVal * potenciaDez(esc - b.escala)
+        se (va < vb) { retorna -1 }
+        se (va > vb) { retorna 1 }
+        retorna 0
+    }
+    se (a.ehNumerico() e b.ehNumerico()) {
+        var ra: real = a.comoReal()
+        var rb: real = b.comoReal()
+        se (ra < rb) { retorna -1 }
+        se (ra > rb) { retorna 1 }
+        retorna 0
+    }
+    se (a.tipoDado == TipoDado.Logico e b.tipoDado == TipoDado.Logico) {
+        se (a.logicoVal == b.logicoVal) { retorna 0 }
+        retorna a.logicoVal ? 1 : -1
+    }
+    var sa: texto = a.paraTexto()
+    var sb: texto = b.paraTexto()
+    se (sa < sb) { retorna -1 }
+    se (sa > sb) { retorna 1 }
+    retorna 0
+}
+
+// Comparação relacional com semântica SQL/LinConEs de NULO (retorna TriLogico).
+funcao compararIgual(a: Valor, b: Valor): TriLogico {
+    se (a.ehNulo() ou b.ehNulo()) {
+        retorna TriLogico.Desconhecido
+    }
+    retorna compararTotal(a, b) == 0 ? TriLogico.Verdadeiro : TriLogico.Falso
+}
+
+funcao compararDiferente(a: Valor, b: Valor): TriLogico {
+    se (a.ehNulo() ou b.ehNulo()) {
+        retorna TriLogico.Desconhecido
+    }
+    retorna compararTotal(a, b) != 0 ? TriLogico.Verdadeiro : TriLogico.Falso
+}
+
+funcao compararMenor(a: Valor, b: Valor): TriLogico {
+    se (a.ehNulo() ou b.ehNulo()) {
+        retorna TriLogico.Desconhecido
+    }
+    retorna compararTotal(a, b) < 0 ? TriLogico.Verdadeiro : TriLogico.Falso
+}
+
+funcao compararMenorIgual(a: Valor, b: Valor): TriLogico {
+    se (a.ehNulo() ou b.ehNulo()) {
+        retorna TriLogico.Desconhecido
+    }
+    retorna compararTotal(a, b) <= 0 ? TriLogico.Verdadeiro : TriLogico.Falso
+}
+
+funcao compararMaior(a: Valor, b: Valor): TriLogico {
+    se (a.ehNulo() ou b.ehNulo()) {
+        retorna TriLogico.Desconhecido
+    }
+    retorna compararTotal(a, b) > 0 ? TriLogico.Verdadeiro : TriLogico.Falso
+}
+
+funcao compararMaiorIgual(a: Valor, b: Valor): TriLogico {
+    se (a.ehNulo() ou b.ehNulo()) {
+        retorna TriLogico.Desconhecido
+    }
+    retorna compararTotal(a, b) >= 0 ? TriLogico.Verdadeiro : TriLogico.Falso
+}
+
+// Operadores da lógica ternária (E, OU, NAO).
+funcao triE(a: TriLogico, b: TriLogico): TriLogico {
+    se (a == TriLogico.Falso ou b == TriLogico.Falso) {
+        retorna TriLogico.Falso
+    }
+    se (a == TriLogico.Verdadeiro e b == TriLogico.Verdadeiro) {
+        retorna TriLogico.Verdadeiro
+    }
+    retorna TriLogico.Desconhecido
+}
+
+funcao triOu(a: TriLogico, b: TriLogico): TriLogico {
+    se (a == TriLogico.Verdadeiro ou b == TriLogico.Verdadeiro) {
+        retorna TriLogico.Verdadeiro
+    }
+    se (a == TriLogico.Falso e b == TriLogico.Falso) {
+        retorna TriLogico.Falso
+    }
+    retorna TriLogico.Desconhecido
+}
+
+funcao triNao(a: TriLogico): TriLogico {
+    se (a == TriLogico.Verdadeiro) { retorna TriLogico.Falso }
+    se (a == TriLogico.Falso) { retorna TriLogico.Verdadeiro }
+    retorna TriLogico.Desconhecido
+}

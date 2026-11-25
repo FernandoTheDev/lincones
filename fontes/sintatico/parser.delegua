@@ -1,0 +1,957 @@
+modulo sintatico.parser
+
+importar diagnosticos.diagnostico como Diag
+importar lexador.token como Tok
+importar lexador.lexador como Lex
+importar ast.nos como Ast
+importar tipos.valor como Val
+
+classe ResultadoSintatico {
+    comandos: Ast.Comando[]
+    diagnosticos: Diag.ColetorDiagnosticos
+
+    construtor(comandos: Ast.Comando[], diagnosticos: Diag.ColetorDiagnosticos) {
+        isto.comandos = comandos
+        isto.diagnosticos = diagnosticos
+    }
+}
+
+classe AnalisadorSintatico {
+    tokens: Tok.Token[]
+    pos: inteiro
+    modoEstrito: logico
+    limiteAninhamento: inteiro
+    profundidade: inteiro
+    contadorParametros: inteiro
+    diagnosticos: Diag.ColetorDiagnosticos
+
+    construtor(
+        tokens: Tok.Token[],
+        diagnosticos: Diag.ColetorDiagnosticos,
+        modoEstrito: logico = falso,
+        limiteAninhamento: inteiro = 64
+    ) {
+        isto.tokens = tokens
+        isto.pos = 0
+        isto.modoEstrito = modoEstrito
+        isto.limiteAninhamento = limiteAninhamento
+        isto.profundidade = 0
+        isto.contadorParametros = 0
+        isto.diagnosticos = diagnosticos
+    }
+
+    estatico analisarCodigo(
+        codigo: texto,
+        arquivo: texto = "",
+        modoEstrito: logico = falso
+    ): ResultadoSintatico {
+        var lex = Lex.Lexador(codigo, arquivo, modoEstrito)
+        var resLex = lex.mapear()
+        var parser = AnalisadorSintatico(resLex.tokens, resLex.diagnosticos, modoEstrito)
+        retorna parser.analisar()
+    }
+
+    atual(): Tok.Token {
+        se (isto.pos >= isto.tokens.tamanho()) {
+            retorna isto.tokens[isto.tokens.tamanho() - 1]
+        }
+        retorna isto.tokens[isto.pos]
+    }
+
+    proximo(): Tok.Token {
+        se (isto.pos + 1 >= isto.tokens.tamanho()) {
+            retorna isto.tokens[isto.tokens.tamanho() - 1]
+        }
+        retorna isto.tokens[isto.pos + 1]
+    }
+
+    fim(): logico {
+        retorna isto.atual().tipoToken == Tok.TipoToken.FimArquivo
+    }
+
+    avancar(): Tok.Token {
+        var t: Tok.Token = isto.atual()
+        se (!isto.fim()) {
+            isto.pos = isto.pos + 1
+        }
+        retorna t
+    }
+
+    verificar(tt: Tok.TipoToken): logico {
+        retorna isto.atual().tipoToken == tt
+    }
+
+    combinar(tt: Tok.TipoToken): logico {
+        se (isto.verificar(tt)) {
+            isto.avancar()
+            retorna verdadeiro
+        }
+        retorna falso
+    }
+
+    esperar(tt: Tok.TipoToken, msg: texto): Tok.Token {
+        se (isto.verificar(tt)) {
+            retorna isto.avancar()
+        }
+        var t: Tok.Token = isto.atual()
+        isto.diagnosticos.erro("SIN001", "sintatico", msg + " Encontrado '${t.lexema}'.", t.intervalo)
+        retorna t
+    }
+
+    esperarIdentificador(contexto: texto): texto {
+        var t: Tok.Token = isto.atual()
+        // Aceita Identificador ou palavras-chave contextuais usadas como nomes de colunas (ex: media, data, texto, numero)
+        se (t.tipoToken == Tok.TipoToken.Identificador
+            ou t.tipoToken == Tok.TipoToken.Media
+            ou t.tipoToken == Tok.TipoToken.Data
+            ou t.tipoToken == Tok.TipoToken.Horario
+            ou t.tipoToken == Tok.TipoToken.Numero
+            ou t.tipoToken == Tok.TipoToken.Ponto) {
+            isto.avancar()
+            retorna t.lexema
+        }
+        isto.diagnosticos.erro("SIN002", "sintatico", "Esperado identificador para ${contexto}. Encontrado '${t.lexema}'.", t.intervalo)
+        retorna ""
+    }
+
+    sincronizar(): vazio {
+        enquanto (!isto.fim()) {
+            se (isto.combinar(Tok.TipoToken.PontoVirgula)) {
+                retorna
+            }
+            var tt: Tok.TipoToken = isto.atual().tipoToken
+            se (tt == Tok.TipoToken.Selecionar
+                ou tt == Tok.TipoToken.Inserir
+                ou tt == Tok.TipoToken.Atualizar
+                ou tt == Tok.TipoToken.Excluir
+                ou tt == Tok.TipoToken.Criar
+                ou tt == Tok.TipoToken.Alterar
+                ou tt == Tok.TipoToken.Remover
+                ou tt == Tok.TipoToken.Iniciar
+                ou tt == Tok.TipoToken.Confirmar
+                ou tt == Tok.TipoToken.Reverter) {
+                retorna
+            }
+            isto.avancar()
+        }
+    }
+
+    analisar(): ResultadoSintatico {
+        var comandos: Ast.Comando[] = []
+        enquanto (!isto.fim()) {
+            se (isto.combinar(Tok.TipoToken.PontoVirgula)) {
+                continua
+            }
+            var errosAntes: inteiro = isto.diagnosticos.quantidadeErros
+            var cmd: qualquer = isto.analisarComando()
+            se (cmd != nulo) {
+                comandos.adicionar(cmd)
+            }
+            se (isto.diagnosticos.quantidadeErros > errosAntes) {
+                isto.sincronizar()
+            } senao {
+                isto.combinar(Tok.TipoToken.PontoVirgula)
+            }
+        }
+        retorna ResultadoSintatico(comandos, isto.diagnosticos)
+    }
+
+    analisarComando(): qualquer {
+        var t: Tok.Token = isto.atual()
+        escolha (t.tipoToken) {
+            caso Tok.TipoToken.Criar: retorna isto.analisarCriar()
+            caso Tok.TipoToken.Alterar: retorna isto.analisarAlterar()
+            caso Tok.TipoToken.Remover: retorna isto.analisarRemover()
+            caso Tok.TipoToken.Inserir: retorna isto.analisarInserir()
+            caso Tok.TipoToken.Selecionar: retorna isto.analisarSelecionar()
+            caso Tok.TipoToken.Atualizar: retorna isto.analisarAtualizar()
+            caso Tok.TipoToken.Excluir: retorna isto.analisarExcluir()
+            caso Tok.TipoToken.Iniciar: retorna isto.analisarTransacao()
+            caso Tok.TipoToken.Confirmar: retorna isto.analisarTransacao()
+            caso Tok.TipoToken.Reverter: retorna isto.analisarTransacao()
+            caso Tok.TipoToken.Ponto: retorna isto.analisarTransacao()
+            caso Tok.TipoToken.Liberar: retorna isto.analisarTransacao()
+            caso Tok.TipoToken.Explicar: retorna isto.analisarExplicar()
+            padrao:
+                isto.diagnosticos.erro(
+                    "SIN003",
+                    "sintatico",
+                    "Comando inesperado iniciado por '${t.lexema}'.",
+                    t.intervalo
+                )
+                isto.avancar()
+                retorna nulo
+        }
+    }
+
+    analisarTipoColuna(col: Ast.ColunaAst): vazio {
+        var t: Tok.Token = isto.atual()
+        escolha (t.tipoToken) {
+            caso Tok.TipoToken.Inteiro:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Inteiro
+            caso Tok.TipoToken.Texto:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Texto
+                se (isto.combinar(Tok.TipoToken.ParenteseEsq)) {
+                    var tokTam: Tok.Token = isto.esperar(Tok.TipoToken.LiteralInteiro, "Esperado tamanho inteiro para TEXTO(n).")
+                    se (tokTam.tipoToken == Tok.TipoToken.LiteralInteiro) {
+                        col.tamanho = inteiro(tokTam.lexema)
+                    }
+                    isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após tamanho de TEXTO.")
+                }
+            caso Tok.TipoToken.Caracteres:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Caracteres
+                se (isto.combinar(Tok.TipoToken.ParenteseEsq)) {
+                    var tokTamC: Tok.Token = isto.esperar(Tok.TipoToken.LiteralInteiro, "Esperado tamanho inteiro para CARACTERES(n).")
+                    se (tokTamC.tipoToken == Tok.TipoToken.LiteralInteiro) {
+                        col.tamanho = inteiro(tokTamC.lexema)
+                    }
+                    isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após tamanho de CARACTERES.")
+                }
+            caso Tok.TipoToken.Logico:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Logico
+            caso Tok.TipoToken.Numero:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Decimal
+                col.precisao = 18
+                col.escala = 2
+                se (isto.combinar(Tok.TipoToken.ParenteseEsq)) {
+                    var tokP: Tok.Token = isto.esperar(Tok.TipoToken.LiteralInteiro, "Esperada precisão inteira.")
+                    se (tokP.tipoToken == Tok.TipoToken.LiteralInteiro) {
+                        col.precisao = inteiro(tokP.lexema)
+                    }
+                    se (isto.combinar(Tok.TipoToken.Virgula)) {
+                        var tokE: Tok.Token = isto.esperar(Tok.TipoToken.LiteralInteiro, "Esperada escala inteira.")
+                        se (tokE.tipoToken == Tok.TipoToken.LiteralInteiro) {
+                            col.escala = inteiro(tokE.lexema)
+                        }
+                    } senao {
+                        col.escala = 0
+                    }
+                    isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após precisão.")
+                }
+            caso Tok.TipoToken.Real:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Real
+            caso Tok.TipoToken.Decimal:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Decimal
+                col.precisao = 18
+                col.escala = 2
+                se (isto.combinar(Tok.TipoToken.ParenteseEsq)) {
+                    var tokPd: Tok.Token = isto.esperar(Tok.TipoToken.LiteralInteiro, "Esperada precisão inteira.")
+                    se (tokPd.tipoToken == Tok.TipoToken.LiteralInteiro) {
+                        col.precisao = inteiro(tokPd.lexema)
+                    }
+                    se (isto.combinar(Tok.TipoToken.Virgula)) {
+                        var tokEd: Tok.Token = isto.esperar(Tok.TipoToken.LiteralInteiro, "Esperada escala inteira.")
+                        se (tokEd.tipoToken == Tok.TipoToken.LiteralInteiro) {
+                            col.escala = inteiro(tokEd.lexema)
+                        }
+                    } senao {
+                        col.escala = 0
+                    }
+                    isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após DECIMAL(p,s).")
+                }
+            caso Tok.TipoToken.Binario:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Binario
+            caso Tok.TipoToken.Data:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Data
+            caso Tok.TipoToken.Horario:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Horario
+            caso Tok.TipoToken.Instante:
+                isto.avancar()
+                col.tipoDado = Val.TipoDado.Instante
+            padrao:
+                isto.diagnosticos.erro("SIN004", "sintatico", "Tipo de dados inválido '${t.lexema}' para coluna '${col.nome}'.", t.intervalo)
+                isto.avancar()
+        }
+    }
+
+    analisarDefinicaoColuna(): Ast.ColunaAst {
+        var tokIni: Tok.Token = isto.atual()
+        var nomeCol: texto = isto.esperarIdentificador("nome da coluna")
+        var col = Ast.ColunaAst(nomeCol, Val.TipoDado.Texto, tokIni.intervalo)
+        isto.analisarTipoColuna(col)
+
+        // Modificadores flexíveis de coluna (NULO, NAO NULO, CHAVE PRIMARIA, AUTO INCREMENTO, UNICA, PADRAO, REFERENCIA)
+        var continuaMod: logico = verdadeiro
+        enquanto (continuaMod e !isto.fim()) {
+            se (isto.combinar(Tok.TipoToken.Nulo)) {
+                col.permiteNulo = verdadeiro
+            } senao se (isto.combinar(Tok.TipoToken.Nao)) {
+                isto.esperar(Tok.TipoToken.Nulo, "Esperado 'NULO' após 'NAO'.")
+                col.permiteNulo = falso
+            } senao se (isto.combinar(Tok.TipoToken.Chave)) {
+                se (isto.combinar(Tok.TipoToken.Primaria)) {
+                    col.chavePrimaria = verdadeiro
+                    col.permiteNulo = falso
+                    col.unica = verdadeiro
+                    se (isto.combinar(Tok.TipoToken.Auto)) {
+                        isto.esperar(Tok.TipoToken.Incremento, "Esperado 'INCREMENTO' após 'AUTO'.")
+                        col.autoIncremento = verdadeiro
+                    }
+                } senao se (isto.combinar(Tok.TipoToken.Estrangeira)) {
+                    isto.esperar(Tok.TipoToken.Referencia, "Esperado 'REFERENCIA' após 'CHAVE ESTRANGEIRA'.")
+                    col.referenciaTabela = isto.esperarIdentificador("tabela referenciada")
+                    isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' na referência de chave estrangeira.")
+                    col.referenciaColuna = isto.esperarIdentificador("coluna referenciada")
+                    isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' na referência de chave estrangeira.")
+                } senao {
+                    isto.diagnosticos.erro("SIN005", "sintatico", "Esperado 'PRIMARIA' ou 'ESTRANGEIRA' após 'CHAVE'.", isto.atual().intervalo)
+                    continuaMod = falso
+                }
+            } senao se (isto.combinar(Tok.TipoToken.Auto)) {
+                isto.esperar(Tok.TipoToken.Incremento, "Esperado 'INCREMENTO' após 'AUTO'.")
+                col.autoIncremento = verdadeiro
+            } senao se (isto.combinar(Tok.TipoToken.Unica) ou isto.combinar(Tok.TipoToken.Unico)) {
+                col.unica = verdadeiro
+            } senao se (isto.combinar(Tok.TipoToken.Padrao)) {
+                col.valorPadrao = isto.analisarExpressao()
+            } senao se (isto.combinar(Tok.TipoToken.Referencia)) {
+                col.referenciaTabela = isto.esperarIdentificador("tabela referenciada")
+                isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' na referência.")
+                col.referenciaColuna = isto.esperarIdentificador("coluna referenciada")
+                isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' na referência.")
+            } senao {
+                continuaMod = falso
+            }
+        }
+        retorna col
+    }
+
+    analisarCriar(): Ast.Comando {
+        var tokIni: Tok.Token = isto.avancar() // consome CRIAR
+        // CRIAR [UNICO] INDICE nome EM tabela (col1, col2)
+        var ehUnico: logico = falso
+        se (isto.combinar(Tok.TipoToken.Unico) ou isto.combinar(Tok.TipoToken.Unica)) {
+            ehUnico = verdadeiro
+        }
+        se (isto.combinar(Tok.TipoToken.Indice)) {
+            var cmdInd = Ast.Comando(Ast.TipoComando.CriarIndice, tokIni.intervalo)
+            cmdInd.indiceUnico = ehUnico
+            se (isto.combinar(Tok.TipoToken.Se)) {
+                isto.esperar(Tok.TipoToken.Nao, "Esperado 'NAO' em 'SE NAO EXISTIR'.")
+                isto.esperar(Tok.TipoToken.Existir, "Esperado 'EXISTIR' em 'SE NAO EXISTIR'.")
+                cmdInd.seNaoExistir = verdadeiro
+            }
+            cmdInd.nomeIndice = isto.esperarIdentificador("nome do índice")
+            isto.esperar(Tok.TipoToken.Em, "Esperado 'EM' em CRIAR INDICE.")
+            cmdInd.tabela = isto.esperarIdentificador("nome da tabela")
+            isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' antes das colunas do índice.")
+            enquanto (!isto.fim() e !isto.verificar(Tok.TipoToken.ParenteseDir)) {
+                cmdInd.colunasNomes.adicionar(isto.esperarIdentificador("coluna do índice"))
+                se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                    sustar
+                }
+            }
+            isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após colunas do índice.")
+            retorna cmdInd
+        }
+
+        // CRIAR TABELA [SE NAO EXISTIR] nome (colunas...)
+        isto.esperar(Tok.TipoToken.Tabela, "Esperado 'TABELA' ou 'INDICE' após 'CRIAR'.")
+        var cmd = Ast.Comando(Ast.TipoComando.CriarTabela, tokIni.intervalo)
+        se (isto.combinar(Tok.TipoToken.Se)) {
+            isto.esperar(Tok.TipoToken.Nao, "Esperado 'NAO' após 'SE'.")
+            isto.esperar(Tok.TipoToken.Existir, "Esperado 'EXISTIR' após 'SE NAO'.")
+            cmd.seNaoExistir = verdadeiro
+        }
+        cmd.tabela = isto.esperarIdentificador("nome da tabela")
+        isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' após nome da tabela.")
+        enquanto (!isto.fim() e !isto.verificar(Tok.TipoToken.ParenteseDir)) {
+            cmd.colunasDef.adicionar(isto.analisarDefinicaoColuna())
+            se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                sustar
+            }
+        }
+        isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' ao finalizar CRIAR TABELA.")
+        retorna cmd
+    }
+
+    analisarAlterar(): Ast.Comando {
+        var tokIni: Tok.Token = isto.avancar() // consome ALTERAR
+        var cmd = Ast.Comando(Ast.TipoComando.AlterarTabela, tokIni.intervalo)
+        se (isto.combinar(Tok.TipoToken.Tabela)) {
+            cmd.entidadeTipo = "TABELA"
+        } senao se (isto.combinar(Tok.TipoToken.Visao)) {
+            cmd.entidadeTipo = "VISAO"
+        } senao {
+            isto.diagnosticos.erro("SIN006", "sintatico", "Esperado 'TABELA' ou 'VISAO' após 'ALTERAR'.", isto.atual().intervalo)
+        }
+        cmd.tabela = isto.esperarIdentificador("nome da tabela")
+
+        enquanto (!isto.fim() e !isto.verificar(Tok.TipoToken.PontoVirgula)) {
+            var tokOp: Tok.Token = isto.atual()
+            se (isto.combinar(Tok.TipoToken.Adicionar)) {
+                se (isto.combinar(Tok.TipoToken.Coluna)) {
+                    var opAdd = Ast.OperacaoAlteracaoAst(Ast.TipoAlteracao.AdicionarColuna, tokOp.intervalo)
+                    var colDef = isto.analisarDefinicaoColuna()
+                    opAdd.nomeColuna = colDef.nome
+                    opAdd.colunaDef = colDef
+                    cmd.operacoesAlteracao.adicionar(opAdd)
+                } senao se (isto.combinar(Tok.TipoToken.Restricao)) {
+                    var nomeRest: texto = isto.esperarIdentificador("nome da restrição")
+                    se (isto.combinar(Tok.TipoToken.Chave)) {
+                        isto.esperar(Tok.TipoToken.Estrangeira, "Esperado 'ESTRANGEIRA' após 'CHAVE'.")
+                        isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' na chave estrangeira.")
+                        var colLocal: texto = isto.esperarIdentificador("coluna local")
+                        isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' na chave estrangeira.")
+                        isto.esperar(Tok.TipoToken.Referencia, "Esperado 'REFERENCIA' na chave estrangeira.")
+                        var tabRef: texto = isto.esperarIdentificador("tabela referenciada")
+                        isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' na tabela referenciada.")
+                        var colRef: texto = isto.esperarIdentificador("coluna referenciada")
+                        isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' na tabela referenciada.")
+                        var opFk = Ast.OperacaoAlteracaoAst(Ast.TipoAlteracao.AdicionarChaveEstrangeira, tokOp.intervalo)
+                        opFk.nomeRestricao = nomeRest
+                        opFk.nomeColuna = colLocal
+                        opFk.tabelaRef = tabRef
+                        opFk.colunaRef = colRef
+                        cmd.operacoesAlteracao.adicionar(opFk)
+                    } senao se (isto.combinar(Tok.TipoToken.Unica) ou isto.combinar(Tok.TipoToken.Unico)) {
+                        isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' em restrição UNICA.")
+                        var colU: texto = isto.esperarIdentificador("coluna única")
+                        isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' em restrição UNICA.")
+                        var opU = Ast.OperacaoAlteracaoAst(Ast.TipoAlteracao.AdicionarUnica, tokOp.intervalo)
+                        opU.nomeRestricao = nomeRest
+                        opU.nomeColuna = colU
+                        cmd.operacoesAlteracao.adicionar(opU)
+                    } senao {
+                        isto.diagnosticos.erro("SIN007", "sintatico", "Tipo de restrição não reconhecido em ALTERAR TABELA.", isto.atual().intervalo)
+                        sustar
+                    }
+                } senao {
+                    isto.diagnosticos.erro("SIN008", "sintatico", "Esperado 'COLUNA' ou 'RESTRICAO' após 'ADICIONAR'.", isto.atual().intervalo)
+                    sustar
+                }
+            } senao se (isto.combinar(Tok.TipoToken.Alterar)) {
+                isto.esperar(Tok.TipoToken.Coluna, "Esperado 'COLUNA' após 'ALTERAR'.")
+                var opAlt = Ast.OperacaoAlteracaoAst(Ast.TipoAlteracao.AlterarColuna, tokOp.intervalo)
+                var colAlt = isto.analisarDefinicaoColuna()
+                opAlt.nomeColuna = colAlt.nome
+                opAlt.colunaDef = colAlt
+                cmd.operacoesAlteracao.adicionar(opAlt)
+            } senao se (isto.combinar(Tok.TipoToken.Remover) ou isto.combinar(Tok.TipoToken.Excluir)) {
+                se (isto.combinar(Tok.TipoToken.Coluna)) {
+                    var opRem = Ast.OperacaoAlteracaoAst(Ast.TipoAlteracao.RemoverColuna, tokOp.intervalo)
+                    opRem.nomeColuna = isto.esperarIdentificador("coluna a remover")
+                    cmd.operacoesAlteracao.adicionar(opRem)
+                } senao se (isto.combinar(Tok.TipoToken.Restricao)) {
+                    var opRemR = Ast.OperacaoAlteracaoAst(Ast.TipoAlteracao.RemoverRestricao, tokOp.intervalo)
+                    opRemR.nomeRestricao = isto.esperarIdentificador("restrição a remover")
+                    cmd.operacoesAlteracao.adicionar(opRemR)
+                } senao {
+                    isto.diagnosticos.erro("SIN009", "sintatico", "Esperado 'COLUNA' ou 'RESTRICAO' após 'REMOVER'.", isto.atual().intervalo)
+                    sustar
+                }
+            } senao se (isto.combinar(Tok.TipoToken.Renomear)) {
+                isto.esperar(Tok.TipoToken.Coluna, "Esperado 'COLUNA' após 'RENOMEAR'.")
+                var opRen = Ast.OperacaoAlteracaoAst(Ast.TipoAlteracao.RenomearColuna, tokOp.intervalo)
+                opRen.nomeColuna = isto.esperarIdentificador("coluna original")
+                isto.esperar(Tok.TipoToken.Para, "Esperado 'PARA' em RENOMEAR COLUNA.")
+                opRen.novoNomeColuna = isto.esperarIdentificador("novo nome da coluna")
+                cmd.operacoesAlteracao.adicionar(opRen)
+            } senao {
+                sustar
+            }
+            isto.combinar(Tok.TipoToken.Virgula)
+        }
+        retorna cmd
+    }
+
+    analisarRemover(): Ast.Comando {
+        var tokIni: Tok.Token = isto.avancar() // consome REMOVER
+        se (isto.combinar(Tok.TipoToken.Indice)) {
+            var cmdInd = Ast.Comando(Ast.TipoComando.RemoverIndice, tokIni.intervalo)
+            se (isto.combinar(Tok.TipoToken.Se)) {
+                isto.esperar(Tok.TipoToken.Existir, "Esperado 'EXISTIR' após 'SE'.")
+                cmdInd.seExistir = verdadeiro
+            }
+            cmdInd.nomeIndice = isto.esperarIdentificador("nome do índice")
+            retorna cmdInd
+        }
+        var cmd = Ast.Comando(Ast.TipoComando.RemoverEntidade, tokIni.intervalo)
+        se (isto.combinar(Tok.TipoToken.Tabela)) {
+            cmd.entidadeTipo = "TABELA"
+        } senao se (isto.combinar(Tok.TipoToken.Visao)) {
+            cmd.entidadeTipo = "VISAO"
+        } senao {
+            isto.diagnosticos.erro("SIN010", "sintatico", "Esperado 'TABELA', 'VISAO' ou 'INDICE' após 'REMOVER'.", isto.atual().intervalo)
+        }
+        se (isto.combinar(Tok.TipoToken.Se)) {
+            isto.esperar(Tok.TipoToken.Existir, "Esperado 'EXISTIR' após 'SE'.")
+            cmd.seExistir = verdadeiro
+        }
+        cmd.tabela = isto.esperarIdentificador("nome da entidade")
+        retorna cmd
+    }
+
+    analisarInserir(): Ast.Comando {
+        var tokIni: Tok.Token = isto.avancar() // consome INSERIR
+        isto.esperar(Tok.TipoToken.Em, "Esperado 'EM' após 'INSERIR'.")
+        var cmd = Ast.Comando(Ast.TipoComando.Inserir, tokIni.intervalo)
+        cmd.tabela = isto.esperarIdentificador("nome da tabela")
+
+        se (isto.combinar(Tok.TipoToken.ParenteseEsq)) {
+            enquanto (!isto.fim() e !isto.verificar(Tok.TipoToken.ParenteseDir)) {
+                cmd.colunasNomes.adicionar(isto.esperarIdentificador("nome da coluna"))
+                se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                    sustar
+                }
+            }
+            isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após lista de colunas.")
+        }
+
+        isto.esperar(Tok.TipoToken.Valores, "Esperado 'VALORES' em comando INSERIR.")
+        var continuarLinhas: logico = verdadeiro
+        enquanto (continuarLinhas) {
+            isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' para valores de INSERIR.")
+            var linha: Ast.Expressao[] = []
+            enquanto (!isto.fim() e !isto.verificar(Tok.TipoToken.ParenteseDir)) {
+                linha.adicionar(isto.analisarExpressao())
+                se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                    sustar
+                }
+            }
+            isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após valores de INSERIR.")
+            cmd.linhasValores.adicionar(linha)
+            se (!isto.modoEstrito e isto.combinar(Tok.TipoToken.Virgula)) {
+                continuarLinhas = verdadeiro
+            } senao {
+                continuarLinhas = falso
+            }
+        }
+        retorna cmd
+    }
+
+    analisarSelecionar(): Ast.Comando {
+        var tokIni: Tok.Token = isto.avancar() // consome SELECIONAR
+        var cmd = Ast.Comando(Ast.TipoComando.Selecionar, tokIni.intervalo)
+
+        se (isto.combinar(Tok.TipoToken.Distinto)) {
+            cmd.distinto = verdadeiro
+        }
+
+        // Lista de projeções
+        enquanto (!isto.fim()) {
+            var expr: Ast.Expressao = isto.analisarExpressao()
+            var apelido: texto = ""
+            se (!isto.modoEstrito e isto.combinar(Tok.TipoToken.Como)) {
+                apelido = isto.esperarIdentificador("apelido da coluna")
+            }
+            cmd.itensSelecao.adicionar(Ast.ItemSelecao(expr, apelido))
+            se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                sustar
+            }
+        }
+
+        se (isto.combinar(Tok.TipoToken.De)) {
+            cmd.tabela = isto.esperarIdentificador("nome da tabela")
+            se (!isto.modoEstrito e isto.combinar(Tok.TipoToken.Como)) {
+                cmd.apelidoTabela = isto.esperarIdentificador("apelido da tabela")
+            }
+        }
+
+        // Junções (extensão)
+        enquanto (!isto.modoEstrito e !isto.fim()) {
+            var tipoJ: Ast.TipoJuncao = Ast.TipoJuncao.Interna
+            var achouJ: logico = falso
+            se (isto.combinar(Tok.TipoToken.Juncao)) {
+                achouJ = verdadeiro
+                se (isto.combinar(Tok.TipoToken.Interna)) {
+                    tipoJ = Ast.TipoJuncao.Interna
+                } senao se (isto.combinar(Tok.TipoToken.Esquerda)) {
+                    tipoJ = Ast.TipoJuncao.Esquerda
+                } senao se (isto.combinar(Tok.TipoToken.Direita)) {
+                    tipoJ = Ast.TipoJuncao.Direita
+                } senao se (isto.combinar(Tok.TipoToken.Completa)) {
+                    tipoJ = Ast.TipoJuncao.Completa
+                } senao se (isto.combinar(Tok.TipoToken.Cruzada)) {
+                    tipoJ = Ast.TipoJuncao.Cruzada
+                }
+            } senao se (isto.verificar(Tok.TipoToken.Interna)
+                ou isto.verificar(Tok.TipoToken.Esquerda)
+                ou isto.verificar(Tok.TipoToken.Direita)
+                ou isto.verificar(Tok.TipoToken.Completa)
+                ou isto.verificar(Tok.TipoToken.Cruzada)) {
+                var tokDir: Tok.Token = isto.avancar()
+                escolha (tokDir.tipoToken) {
+                    caso Tok.TipoToken.Interna: tipoJ = Ast.TipoJuncao.Interna
+                    caso Tok.TipoToken.Esquerda: tipoJ = Ast.TipoJuncao.Esquerda
+                    caso Tok.TipoToken.Direita: tipoJ = Ast.TipoJuncao.Direita
+                    caso Tok.TipoToken.Completa: tipoJ = Ast.TipoJuncao.Completa
+                    caso Tok.TipoToken.Cruzada: tipoJ = Ast.TipoJuncao.Cruzada
+                }
+                isto.esperar(Tok.TipoToken.Juncao, "Esperado 'JUNCAO' após tipo de junção.")
+                achouJ = verdadeiro
+            }
+            se (!achouJ) {
+                sustar
+            }
+            var tabJ: texto = isto.esperarIdentificador("tabela da junção")
+            var apJ: texto = ""
+            se (isto.combinar(Tok.TipoToken.Como)) {
+                apJ = isto.esperarIdentificador("apelido da tabela na junção")
+            }
+            var condJ: qualquer = nulo
+            se (tipoJ != Ast.TipoJuncao.Cruzada) {
+                isto.esperar(Tok.TipoToken.Em, "Esperado 'EM' para condição da junção.")
+                condJ = isto.analisarExpressao()
+            }
+            cmd.juncoes.adicionar(Ast.ClausulaJuncao(tipoJ, tabJ, apJ, condJ))
+        }
+
+        // ONDE
+        se (isto.combinar(Tok.TipoToken.Onde)) {
+            cmd.condicaoOnde = isto.analisarExpressao()
+        }
+
+        // AGRUPAR POR
+        se (isto.combinar(Tok.TipoToken.Agrupar)) {
+            isto.esperar(Tok.TipoToken.Por, "Esperado 'POR' após 'AGRUPAR'.")
+            enquanto (!isto.fim()) {
+                cmd.agruparPor.adicionar(isto.analisarExpressao())
+                se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                    sustar
+                }
+            }
+            se (!isto.modoEstrito e isto.combinar(Tok.TipoToken.Tendo)) {
+                cmd.condicaoTendo = isto.analisarExpressao()
+            }
+        }
+
+        // ORDENAR POR
+        se (isto.combinar(Tok.TipoToken.Ordenar)) {
+            isto.esperar(Tok.TipoToken.Por, "Esperado 'POR' após 'ORDENAR'.")
+            enquanto (!isto.fim()) {
+                var eOrd: Ast.Expressao = isto.analisarExpressao()
+                var desc: logico = falso
+                se (isto.combinar(Tok.TipoToken.Decrescente)) {
+                    desc = verdadeiro
+                } senao {
+                    isto.combinar(Tok.TipoToken.Crescente)
+                }
+                cmd.ordenarPor.adicionar(Ast.ItemOrdenacao(eOrd, desc))
+                se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                    sustar
+                }
+            }
+        }
+
+        // LIMITE / DESLOCAMENTO
+        se (!isto.modoEstrito e isto.combinar(Tok.TipoToken.Limite)) {
+            var tokLim: Tok.Token = isto.esperar(Tok.TipoToken.LiteralInteiro, "Esperado inteiro após 'LIMITE'.")
+            se (tokLim.tipoToken == Tok.TipoToken.LiteralInteiro) {
+                cmd.limite = inteiro(tokLim.lexema)
+            }
+            se (isto.combinar(Tok.TipoToken.Deslocamento)) {
+                var tokDes: Tok.Token = isto.esperar(Tok.TipoToken.LiteralInteiro, "Esperado inteiro após 'DESLOCAMENTO'.")
+                se (tokDes.tipoToken == Tok.TipoToken.LiteralInteiro) {
+                    cmd.deslocamento = inteiro(tokDes.lexema)
+                }
+            }
+        }
+
+        retorna cmd
+    }
+
+    analisarAtualizar(): Ast.Comando {
+        var tokIni: Tok.Token = isto.avancar() // consome ATUALIZAR
+        var cmd = Ast.Comando(Ast.TipoComando.Atualizar, tokIni.intervalo)
+        cmd.tabela = isto.esperarIdentificador("nome da tabela")
+        isto.esperar(Tok.TipoToken.Definir, "Esperado 'DEFINIR' em ATUALIZAR.")
+        enquanto (!isto.fim()) {
+            var tokCol: Tok.Token = isto.atual()
+            var nomeCol: texto = isto.esperarIdentificador("coluna a atualizar")
+            isto.esperar(Tok.TipoToken.Igual, "Esperado '=' na atribuição de ATUALIZAR.")
+            var valExpr: Ast.Expressao = isto.analisarExpressao()
+            cmd.atribuicoes.adicionar(Ast.AtribuicaoAst(nomeCol, valExpr, tokCol.intervalo))
+            se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                sustar
+            }
+        }
+        se (isto.combinar(Tok.TipoToken.Onde)) {
+            cmd.condicaoOnde = isto.analisarExpressao()
+        }
+        retorna cmd
+    }
+
+    analisarExcluir(): Ast.Comando {
+        var tokIni: Tok.Token = isto.avancar() // consome EXCLUIR
+        var cmd = Ast.Comando(Ast.TipoComando.Excluir, tokIni.intervalo)
+        // Aceita EXCLUIR DE tabela, EXCLUIR EM tabela e EXCLUIR tabela (compatibilidade lincones-mysql)
+        se (!isto.combinar(Tok.TipoToken.De)) {
+            isto.combinar(Tok.TipoToken.Em)
+        }
+        cmd.tabela = isto.esperarIdentificador("nome da tabela")
+        se (isto.combinar(Tok.TipoToken.Onde)) {
+            cmd.condicaoOnde = isto.analisarExpressao()
+        }
+        retorna cmd
+    }
+
+    analisarTransacao(): Ast.Comando {
+        var tokIni: Tok.Token = isto.avancar()
+        var cmd = Ast.Comando(Ast.TipoComando.Transacao, tokIni.intervalo)
+        escolha (tokIni.tipoToken) {
+            caso Tok.TipoToken.Iniciar:
+                isto.combinar(Tok.TipoToken.Transacao)
+                cmd.tipoTransacao = Ast.TipoTransacao.Iniciar
+            caso Tok.TipoToken.Confirmar:
+                isto.combinar(Tok.TipoToken.Transacao)
+                cmd.tipoTransacao = Ast.TipoTransacao.Confirmar
+            caso Tok.TipoToken.Reverter:
+                se (isto.combinar(Tok.TipoToken.Para)) {
+                    isto.combinar(Tok.TipoToken.Ponto)
+                    isto.combinar(Tok.TipoToken.De)
+                    isto.combinar(Tok.TipoToken.Salvamento)
+                    cmd.tipoTransacao = Ast.TipoTransacao.ReverterPara
+                    cmd.nomePonto = isto.esperarIdentificador("nome do ponto de salvamento")
+                } senao {
+                    isto.combinar(Tok.TipoToken.Transacao)
+                    cmd.tipoTransacao = Ast.TipoTransacao.Reverter
+                }
+            caso Tok.TipoToken.Ponto:
+                isto.combinar(Tok.TipoToken.De)
+                isto.esperar(Tok.TipoToken.Salvamento, "Esperado 'SALVAMENTO' em PONTO DE SALVAMENTO.")
+                cmd.tipoTransacao = Ast.TipoTransacao.PontoSalvamento
+                cmd.nomePonto = isto.esperarIdentificador("nome do ponto de salvamento")
+            caso Tok.TipoToken.Liberar:
+                isto.combinar(Tok.TipoToken.Ponto)
+                isto.combinar(Tok.TipoToken.De)
+                isto.combinar(Tok.TipoToken.Salvamento)
+                cmd.tipoTransacao = Ast.TipoTransacao.LiberarPonto
+                cmd.nomePonto = isto.esperarIdentificador("nome do ponto de salvamento")
+        }
+        retorna cmd
+    }
+
+    analisarExplicar(): Ast.Comando {
+        var tokIni: Tok.Token = isto.avancar() // consome EXPLICAR
+        var cmd = Ast.Comando(Ast.TipoComando.Explicar, tokIni.intervalo)
+        se (isto.combinar(Tok.TipoToken.Analisar)) {
+            cmd.analisarExecucao = verdadeiro
+        }
+        cmd.comandoAlvo = isto.analisarComando()
+        retorna cmd
+    }
+
+    // === EXPRESSÕES COM PRECEDÊNCIA ===
+    analisarExpressao(): Ast.Expressao {
+        isto.profundidade = isto.profundidade + 1
+        se (isto.profundidade > isto.limiteAninhamento) {
+            isto.diagnosticos.erro(
+                "SIN020",
+                "sintatico",
+                "Profundidade máxima de aninhamento excedida (${isto.limiteAninhamento}).",
+                isto.atual().intervalo
+            )
+            isto.profundidade = isto.profundidade - 1
+            retorna Ast.Expressao.literal(Val.Valor.nuloVal(), isto.atual().intervalo)
+        }
+        var r: Ast.Expressao = isto.analisarOu()
+        isto.profundidade = isto.profundidade - 1
+        retorna r
+    }
+
+    analisarOu(): Ast.Expressao {
+        var esq: Ast.Expressao = isto.analisarE()
+        enquanto (isto.combinar(Tok.TipoToken.Ou)) {
+            var dir: Ast.Expressao = isto.analisarE()
+            esq = Ast.Expressao.binaria("OU", esq, dir, esq.intervalo)
+        }
+        retorna esq
+    }
+
+    analisarE(): Ast.Expressao {
+        var esq: Ast.Expressao = isto.analisarNao()
+        enquanto (isto.combinar(Tok.TipoToken.E)) {
+            var dir: Ast.Expressao = isto.analisarNao()
+            esq = Ast.Expressao.binaria("E", esq, dir, esq.intervalo)
+        }
+        retorna esq
+    }
+
+    analisarNao(): Ast.Expressao {
+        se (isto.combinar(Tok.TipoToken.Nao)) {
+            var op: Ast.Expressao = isto.analisarNao()
+            retorna Ast.Expressao.unaria("NAO", op, op.intervalo)
+        }
+        retorna isto.analisarComparacao()
+    }
+
+    analisarComparacao(): Ast.Expressao {
+        var esq: Ast.Expressao = isto.analisarAdicao()
+
+        // EH [NAO] NULO
+        se (isto.combinar(Tok.TipoToken.Eh)) {
+            var neg: logico = isto.combinar(Tok.TipoToken.Nao)
+            isto.esperar(Tok.TipoToken.Nulo, "Esperado 'NULO' após 'EH'.")
+            retorna Ast.Expressao.ehNulo(esq, neg, esq.intervalo)
+        }
+
+        // [NAO] ENTRE a E b | [NAO] EM (...) | [NAO] COMO padrao
+        var negOp: logico = falso
+        se (isto.verificar(Tok.TipoToken.Nao)) {
+            var prox: Tok.TipoToken = isto.proximo().tipoToken
+            se (prox == Tok.TipoToken.Entre ou prox == Tok.TipoToken.Em ou prox == Tok.TipoToken.Como) {
+                isto.avancar()
+                negOp = verdadeiro
+            }
+        }
+        se (isto.combinar(Tok.TipoToken.Entre)) {
+            var ini: Ast.Expressao = isto.analisarAdicao()
+            isto.esperar(Tok.TipoToken.E, "Esperado 'E' em expressão ENTRE.")
+            var fimExpr: Ast.Expressao = isto.analisarAdicao()
+            retorna Ast.Expressao.entre(esq, ini, fimExpr, negOp, esq.intervalo)
+        }
+        se (isto.combinar(Tok.TipoToken.Em)) {
+            isto.esperar(Tok.TipoToken.ParenteseEsq, "Esperado '(' após 'EM'.")
+            var lista: Ast.Expressao[] = []
+            enquanto (!isto.fim() e !isto.verificar(Tok.TipoToken.ParenteseDir)) {
+                lista.adicionar(isto.analisarExpressao())
+                se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                    sustar
+                }
+            }
+            isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após lista de 'EM'.")
+            retorna Ast.Expressao.emLista(esq, lista, negOp, esq.intervalo)
+        }
+        se (isto.combinar(Tok.TipoToken.Como)) {
+            var padraoExpr: Ast.Expressao = isto.analisarAdicao()
+            var cmpComo = Ast.Expressao.binaria("COMO", esq, padraoExpr, esq.intervalo)
+            retorna negOp ? Ast.Expressao.unaria("NAO", cmpComo, esq.intervalo) : cmpComo
+        }
+
+        // Operadores binários de comparação
+        var t: Tok.Token = isto.atual()
+        se (t.tipoToken == Tok.TipoToken.Igual
+            ou t.tipoToken == Tok.TipoToken.Diferente
+            ou t.tipoToken == Tok.TipoToken.Menor
+            ou t.tipoToken == Tok.TipoToken.MenorIgual
+            ou t.tipoToken == Tok.TipoToken.Maior
+            ou t.tipoToken == Tok.TipoToken.MaiorIgual) {
+            isto.avancar()
+            var opStr: texto = t.lexema
+            se (opStr == "<>") {
+                opStr = "!="
+            }
+            var dir: Ast.Expressao = isto.analisarAdicao()
+            retorna Ast.Expressao.binaria(opStr, esq, dir, esq.intervalo)
+        }
+        retorna esq
+    }
+
+    analisarAdicao(): Ast.Expressao {
+        var esq: Ast.Expressao = isto.analisarMultiplicacao()
+        enquanto (isto.verificar(Tok.TipoToken.Mais) ou isto.verificar(Tok.TipoToken.Menos)) {
+            var op: texto = isto.avancar().lexema
+            var dir: Ast.Expressao = isto.analisarMultiplicacao()
+            esq = Ast.Expressao.binaria(op, esq, dir, esq.intervalo)
+        }
+        retorna esq
+    }
+
+    analisarMultiplicacao(): Ast.Expressao {
+        var esq: Ast.Expressao = isto.analisarUnario()
+        enquanto (isto.verificar(Tok.TipoToken.Asterisco)
+            ou isto.verificar(Tok.TipoToken.Barra)
+            ou isto.verificar(Tok.TipoToken.Porcento)) {
+            var op: texto = isto.avancar().lexema
+            var dir: Ast.Expressao = isto.analisarUnario()
+            esq = Ast.Expressao.binaria(op, esq, dir, esq.intervalo)
+        }
+        retorna esq
+    }
+
+    analisarUnario(): Ast.Expressao {
+        se (isto.combinar(Tok.TipoToken.Menos)) {
+            var op: Ast.Expressao = isto.analisarUnario()
+            retorna Ast.Expressao.unaria("-", op, op.intervalo)
+        }
+        se (isto.combinar(Tok.TipoToken.Mais)) {
+            retorna isto.analisarUnario()
+        }
+        retorna isto.analisarPrimario()
+    }
+
+    analisarPrimario(): Ast.Expressao {
+        var t: Tok.Token = isto.atual()
+        escolha (t.tipoToken) {
+            caso Tok.TipoToken.Asterisco:
+                isto.avancar()
+                retorna Ast.Expressao.asterisco("", t.intervalo)
+            caso Tok.TipoToken.LiteralInteiro:
+                isto.avancar()
+                retorna Ast.Expressao.literal(Val.Valor.deInteiro(inteiro(t.lexema)), t.intervalo)
+            caso Tok.TipoToken.LiteralReal:
+                isto.avancar()
+                retorna Ast.Expressao.literal(Val.Valor.deReal(real(t.lexema)), t.intervalo)
+            caso Tok.TipoToken.LiteralTexto:
+                isto.avancar()
+                retorna Ast.Expressao.literal(Val.Valor.deTexto(t.lexema), t.intervalo)
+            caso Tok.TipoToken.Verdadeiro:
+                isto.avancar()
+                retorna Ast.Expressao.literal(Val.Valor.deLogico(verdadeiro), t.intervalo)
+            caso Tok.TipoToken.Falso:
+                isto.avancar()
+                retorna Ast.Expressao.literal(Val.Valor.deLogico(falso), t.intervalo)
+            caso Tok.TipoToken.Nulo:
+                isto.avancar()
+                retorna Ast.Expressao.literal(Val.Valor.nuloVal(), t.intervalo)
+            caso Tok.TipoToken.Interrogacao:
+                isto.avancar()
+                isto.contadorParametros = isto.contadorParametros + 1
+                retorna Ast.Expressao.parametro("", isto.contadorParametros, t.intervalo)
+            caso Tok.TipoToken.DoisPontos:
+                isto.avancar()
+                var nomeParam: texto = isto.esperarIdentificador("nome do parâmetro")
+                isto.contadorParametros = isto.contadorParametros + 1
+                retorna Ast.Expressao.parametro(nomeParam, isto.contadorParametros, t.intervalo)
+            caso Tok.TipoToken.ParenteseEsq:
+                isto.avancar()
+                var interna: Ast.Expressao = isto.analisarExpressao()
+                isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' para fechar expressão.")
+                retorna interna
+            padrao:
+                se (t.tipoToken == Tok.TipoToken.Identificador
+                    ou t.tipoToken == Tok.TipoToken.Media
+                    ou t.tipoToken == Tok.TipoToken.Data
+                    ou t.tipoToken == Tok.TipoToken.Horario
+                    ou t.tipoToken == Tok.TipoToken.Numero) {
+                    isto.avancar()
+                    // Chamada de função: NOME([DISTINTO] args...)
+                    se (isto.combinar(Tok.TipoToken.ParenteseEsq)) {
+                        var dist: logico = isto.combinar(Tok.TipoToken.Distinto)
+                        var args: Ast.Expressao[] = []
+                        enquanto (!isto.fim() e !isto.verificar(Tok.TipoToken.ParenteseDir)) {
+                            args.adicionar(isto.analisarExpressao())
+                            se (!isto.combinar(Tok.TipoToken.Virgula)) {
+                                sustar
+                            }
+                        }
+                        isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após argumentos de '${t.lexema}'.")
+                        retorna Ast.Expressao.chamada(t.lexema.maiusculo(), args, dist, t.intervalo)
+                    }
+                    // Referência qualificada: tabela.coluna ou tabela.*
+                    se (isto.combinar(Tok.TipoToken.PontoSimbolo)) {
+                        se (isto.combinar(Tok.TipoToken.Asterisco)) {
+                            retorna Ast.Expressao.asterisco(t.lexema, t.intervalo)
+                        }
+                        var colNome: texto = isto.esperarIdentificador("nome da coluna após '.'")
+                        retorna Ast.Expressao.coluna(t.lexema, colNome, t.intervalo)
+                    }
+                    retorna Ast.Expressao.coluna("", t.lexema, t.intervalo)
+                }
+                isto.diagnosticos.erro("SIN011", "sintatico", "Expressão inesperada: '${t.lexema}'.", t.intervalo)
+                isto.avancar()
+                retorna Ast.Expressao.literal(Val.Valor.nuloVal(), t.intervalo)
+        }
+    }
+}

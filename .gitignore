@@ -1,0 +1,7 @@
+compilacao/
+*.o
+*.c
+*.lce
+*.lce-wal
+*.lce-lock
+*.tmp

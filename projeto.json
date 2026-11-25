@@ -1,0 +1,19 @@
+{
+    "bibliotecasNativas": [],
+    "compilacao": {
+        "compiladorC": "auto",
+        "depuracao": true,
+        "modo": "desenvolvimento",
+        "otimizacao": 0,
+        "paralelismo": "auto"
+    },
+    "dependencias": {},
+    "entrada": "fontes\/principal.delegua",
+    "nome": "lincones",
+    "saida": "compilacao\/lincones",
+    "testes": {
+        "diretorio": "testes"
+    },
+    "tipo": "aplicativo",
+    "versao": "0.1.0"
+}

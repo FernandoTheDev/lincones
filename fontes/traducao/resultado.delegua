@@ -1,0 +1,486 @@
+modulo traducao.resultado
+
+importar diagnosticos.diagnostico como Diag
+importar ast.nos como Ast
+importar tipos.valor como Val
+
+enum DialetoSQL {
+    SQLite,
+    PostgreSQL,
+    MySQL
+}
+
+classe ParametroTraduzido {
+    indice: inteiro
+    nome: texto
+    marcadorGerado: texto
+
+    construtor(indice: inteiro, nome: texto, marcadorGerado: texto) {
+        isto.indice = indice
+        isto.nome = nome
+        isto.marcadorGerado = marcadorGerado
+    }
+}
+
+classe ResultadoTraducao {
+    dialeto: DialetoSQL
+    sql: texto
+    parametros: ParametroTraduzido[]
+    avisos: texto[]
+    transformacoes: texto[]
+    diagnosticos: Diag.ColetorDiagnosticos
+
+    construtor(dialeto: DialetoSQL) {
+        isto.dialeto = dialeto
+        isto.sql = ""
+        isto.parametros = []
+        isto.avisos = []
+        isto.transformacoes = []
+        isto.diagnosticos = Diag.ColetorDiagnosticos()
+    }
+
+    temErros(): logico {
+        retorna isto.diagnosticos.temErros()
+    }
+}
+
+// Escapa literal textual SQL com aspas simples duplicadas (' -> ''), nunca interpolando sem escape.
+funcao escaparLiteralTexto(valor: texto): texto {
+    var escapado: texto = valor.substituir("'", "''")
+    retorna "'" + escapado + "'"
+}
+
+// Delimitação segura de identificadores por dialeto.
+funcao delimitarIdentificador(nome: texto, dialeto: DialetoSQL): texto {
+    se (dialeto == DialetoSQL.MySQL) {
+        retorna "`" + nome.substituir("`", "``") + "`"
+    }
+    retorna "\"" + nome.substituir("\"", "\"\"") + "\""
+}
+
+// Traduz nome de função LinConEs para SQL padrão.
+funcao traduzirNomeFuncao(nomeMaiusculo: texto, dialeto: DialetoSQL): texto {
+    escolha (nomeMaiusculo) {
+        caso "CONTAR": retorna "COUNT"
+        caso "SOMA": retorna "SUM"
+        caso "MEDIA": retorna "AVG"
+        caso "MÉDIA": retorna "AVG"
+        caso "MINIMO": retorna "MIN"
+        caso "MÍNIMO": retorna "MIN"
+        caso "MAXIMO": retorna "MAX"
+        caso "MÁXIMO": retorna "MAX"
+        caso "MAIUSCULO": retorna "UPPER"
+        caso "MAIÚSCULO": retorna "UPPER"
+        caso "MINUSCULO": retorna "LOWER"
+        caso "MINÚSCULO": retorna "LOWER"
+        caso "TAMANHO": retorna "LENGTH"
+        caso "ABSOLUTO": retorna "ABS"
+        caso "ARREDONDAR": retorna "ROUND"
+        caso "COALESCER": retorna "COALESCE"
+        caso "SE_NULO":
+            se (dialeto == DialetoSQL.PostgreSQL) {
+                retorna "COALESCE"
+            }
+            retorna "IFNULL"
+    }
+    retorna nomeMaiusculo
+}
+
+funcao traduzirTipoJuncao(tj: Ast.TipoJuncao): texto {
+    escolha (tj) {
+        caso Ast.TipoJuncao.Interna: retorna "INNER JOIN"
+        caso Ast.TipoJuncao.Esquerda: retorna "LEFT JOIN"
+        caso Ast.TipoJuncao.Direita: retorna "RIGHT JOIN"
+        caso Ast.TipoJuncao.Completa: retorna "FULL OUTER JOIN"
+        caso Ast.TipoJuncao.Cruzada: retorna "CROSS JOIN"
+    }
+    retorna "INNER JOIN"
+}
+
+// Tradutor base parametrizado por dialeto, evitando duplicação e garantindo semântica consistente.
+classe TradutorBase {
+    dialeto: DialetoSQL
+    delimitarIdentificadores: logico
+
+    construtor(dialeto: DialetoSQL, delimitarIdentificadores: logico = falso) {
+        isto.dialeto = dialeto
+        isto.delimitarIdentificadores = delimitarIdentificadores
+    }
+
+    ident(nome: texto): texto {
+        se (isto.delimitarIdentificadores) {
+            retorna delimitarIdentificador(nome, isto.dialeto)
+        }
+        retorna nome
+    }
+
+    traduzirTipoColuna(col: Ast.ColunaAst): texto {
+        escolha (col.tipoDado) {
+            caso Val.TipoDado.Inteiro: retorna "INTEGER"
+            caso Val.TipoDado.Real:
+                se (isto.dialeto == DialetoSQL.PostgreSQL) { retorna "DOUBLE PRECISION" }
+                se (isto.dialeto == DialetoSQL.MySQL) { retorna "DOUBLE" }
+                retorna "REAL"
+            caso Val.TipoDado.Decimal:
+                se (col.precisao > 0) {
+                    retorna "NUMERIC(${col.precisao}, ${col.escala})"
+                }
+                retorna "NUMERIC"
+            caso Val.TipoDado.Logico:
+                se (isto.dialeto == DialetoSQL.MySQL) { retorna "BOOLEAN" }
+                retorna "BOOLEAN"
+            caso Val.TipoDado.Texto:
+                se (col.tamanho > 0) {
+                    retorna "VARCHAR(${col.tamanho})"
+                }
+                retorna "TEXT"
+            caso Val.TipoDado.Caracteres:
+                se (col.tamanho > 0) {
+                    retorna "VARCHAR(${col.tamanho})"
+                }
+                retorna "VARCHAR(255)"
+            caso Val.TipoDado.Binario:
+                se (isto.dialeto == DialetoSQL.PostgreSQL) { retorna "BYTEA" }
+                retorna "BLOB"
+            caso Val.TipoDado.Data: retorna "DATE"
+            caso Val.TipoDado.Horario: retorna "TIME"
+            caso Val.TipoDado.Instante: retorna "TIMESTAMP"
+        }
+        retorna "TEXT"
+    }
+
+    traduzirDefinicaoColuna(col: Ast.ColunaAst, res: ResultadoTraducao): texto {
+        var tipoSql: texto = isto.traduzirTipoColuna(col)
+        var s: texto = isto.ident(col.nome) + " "
+
+        se (isto.dialeto == DialetoSQL.SQLite) {
+            s = s + tipoSql
+            se (col.chavePrimaria) {
+                s = s + " PRIMARY KEY"
+                se (col.autoIncremento) {
+                    s = s + " AUTOINCREMENT"
+                }
+            }
+            se (!col.permiteNulo e !col.chavePrimaria) {
+                s = s + " NOT NULL"
+            } senao se (col.chavePrimaria) {
+                s = s + " NOT NULL"
+            }
+            se (col.unica e !col.chavePrimaria) {
+                s = s + " UNIQUE"
+            }
+        } senao se (isto.dialeto == DialetoSQL.PostgreSQL) {
+            s = s + tipoSql
+            se (col.autoIncremento) {
+                s = s + " GENERATED BY DEFAULT AS IDENTITY"
+                res.transformacoes.adicionar("AUTO INCREMENTO -> GENERATED BY DEFAULT AS IDENTITY em ${col.nome}")
+            }
+            se (!col.permiteNulo) {
+                s = s + " NOT NULL"
+            }
+            se (col.chavePrimaria) {
+                s = s + " PRIMARY KEY"
+            } senao se (col.unica) {
+                s = s + " UNIQUE"
+            }
+        } senao {
+            // MySQL
+            s = s + tipoSql
+            se (!col.permiteNulo) {
+                s = s + " NOT NULL"
+            }
+            se (col.autoIncremento) {
+                s = s + " AUTO_INCREMENT"
+            }
+            se (col.chavePrimaria) {
+                s = s + " PRIMARY KEY"
+            } senao se (col.unica) {
+                s = s + " UNIQUE"
+            }
+        }
+
+        se (col.valorPadrao != nulo) {
+            s = s + " DEFAULT " + isto.traduzirExpressao(col.valorPadrao, res)
+        }
+        se (col.referenciaTabela != "") {
+            s = s + " REFERENCES " + isto.ident(col.referenciaTabela) + "(" + isto.ident(col.referenciaColuna) + ")"
+        }
+        retorna s
+    }
+
+    traduzirExpressao(expr: Ast.Expressao, res: ResultadoTraducao): texto {
+        escolha (expr.tipoExpr) {
+            caso Ast.TipoExpressao.Asterisco:
+                se (expr.tabelaRef != "") {
+                    retorna isto.ident(expr.tabelaRef) + ".*"
+                }
+                retorna "*"
+            caso Ast.TipoExpressao.Literal:
+                var v: Val.Valor = expr.valorLiteral
+                escolha (v.tipoDado) {
+                    caso Val.TipoDado.Nulo: retorna "NULL"
+                    caso Val.TipoDado.Inteiro: retorna texto(v.inteiroVal)
+                    caso Val.TipoDado.Real: retorna texto(v.realVal)
+                    caso Val.TipoDado.Decimal: retorna v.paraTexto()
+                    caso Val.TipoDado.Logico: retorna v.logicoVal ? "TRUE" : "FALSE"
+                    padrao: retorna escaparLiteralTexto(v.paraTexto())
+                }
+            caso Ast.TipoExpressao.Coluna:
+                se (expr.tabelaRef != "") {
+                    retorna isto.ident(expr.tabelaRef) + "." + isto.ident(expr.nome)
+                }
+                retorna isto.ident(expr.nome)
+            caso Ast.TipoExpressao.Parametro:
+                var idx: inteiro = res.parametros.tamanho() + 1
+                var marcador: texto = "?"
+                se (isto.dialeto == DialetoSQL.PostgreSQL) {
+                    marcador = "$" + texto(idx)
+                } senao se (isto.dialeto == DialetoSQL.SQLite e expr.nome != "") {
+                    marcador = ":" + expr.nome
+                }
+                res.parametros.adicionar(ParametroTraduzido(idx, expr.nome, marcador))
+                retorna marcador
+            caso Ast.TipoExpressao.Unaria:
+                se (expr.operador == "NAO") {
+                    retorna "NOT (" + isto.traduzirExpressao(expr.esquerda, res) + ")"
+                }
+                retorna expr.operador + isto.traduzirExpressao(expr.esquerda, res)
+            caso Ast.TipoExpressao.Binaria:
+                var opSql: texto = expr.operador
+                se (opSql == "E") { opSql = "AND" }
+                senao se (opSql == "OU") { opSql = "OR" }
+                senao se (opSql == "COMO") { opSql = "LIKE" }
+                senao se (opSql == "!=") { opSql = "<>" }
+                var sEsq: texto = isto.traduzirExpressao(expr.esquerda, res)
+                var sDir: texto = isto.traduzirExpressao(expr.direita, res)
+                se (opSql == "AND" ou opSql == "OR") {
+                    retorna "(${sEsq} ${opSql} ${sDir})"
+                }
+                retorna "${sEsq} ${opSql} ${sDir}"
+            caso Ast.TipoExpressao.EhNulo:
+                var alvoN: texto = isto.traduzirExpressao(expr.esquerda, res)
+                retorna expr.negado ? "${alvoN} IS NOT NULL" : "${alvoN} IS NULL"
+            caso Ast.TipoExpressao.Entre:
+                var alvoE: texto = isto.traduzirExpressao(expr.esquerda, res)
+                var iniE: texto = isto.traduzirExpressao(expr.direita, res)
+                var fimE: texto = isto.traduzirExpressao(expr.terceiro, res)
+                retorna expr.negado ? "${alvoE} NOT BETWEEN ${iniE} AND ${fimE}" : "${alvoE} BETWEEN ${iniE} AND ${fimE}"
+            caso Ast.TipoExpressao.EmLista:
+                var alvoL: texto = isto.traduzirExpressao(expr.esquerda, res)
+                var itensStr: texto = ""
+                para (var i: inteiro = 0; i < expr.argumentos.tamanho(); i = i + 1) {
+                    se (i > 0) { itensStr = itensStr + ", " }
+                    itensStr = itensStr + isto.traduzirExpressao(expr.argumentos[i], res)
+                }
+                retorna expr.negado ? "${alvoL} NOT IN (${itensStr})" : "${alvoL} IN (${itensStr})"
+            caso Ast.TipoExpressao.Chamada:
+                var fnSql: texto = traduzirNomeFuncao(expr.nome, isto.dialeto)
+                var argsStr: texto = expr.distinto ? "DISTINCT " : ""
+                para (var a: inteiro = 0; a < expr.argumentos.tamanho(); a = a + 1) {
+                    se (a > 0) { argsStr = argsStr + ", " }
+                    argsStr = argsStr + isto.traduzirExpressao(expr.argumentos[a], res)
+                }
+                retorna "${fnSql}(${argsStr})"
+        }
+        retorna ""
+    }
+
+    traduzirComando(cmd: Ast.Comando): ResultadoTraducao {
+        var res = ResultadoTraducao(isto.dialeto)
+        escolha (cmd.tipoCmd) {
+            caso Ast.TipoComando.CriarTabela:
+                var s: texto = "CREATE TABLE "
+                se (cmd.seNaoExistir) { s = s + "IF NOT EXISTS " }
+                s = s + isto.ident(cmd.tabela) + " ("
+                para (var i: inteiro = 0; i < cmd.colunasDef.tamanho(); i = i + 1) {
+                    se (i > 0) { s = s + ", " }
+                    s = s + isto.traduzirDefinicaoColuna(cmd.colunasDef[i], res)
+                }
+                s = s + ")"
+                res.sql = s
+            caso Ast.TipoComando.AlterarTabela:
+                var entidade: texto = cmd.entidadeTipo == "VISAO" ? "VIEW" : "TABLE"
+                var sAlt: texto = ""
+                para (var opi: inteiro = 0; opi < cmd.operacoesAlteracao.tamanho(); opi = opi + 1) {
+                    var op: Ast.OperacaoAlteracaoAst = cmd.operacoesAlteracao[opi]
+                    se (opi > 0) { sAlt = sAlt + "; " }
+                    sAlt = sAlt + "ALTER ${entidade} " + isto.ident(cmd.tabela) + " "
+                    escolha (op.tipoAlteracao) {
+                        caso Ast.TipoAlteracao.AdicionarColuna:
+                            sAlt = sAlt + "ADD COLUMN " + isto.traduzirDefinicaoColuna(op.colunaDef, res)
+                        caso Ast.TipoAlteracao.AlterarColuna:
+                            se (isto.dialeto == DialetoSQL.SQLite) {
+                                res.diagnosticos.erro(
+                                    "TRD001",
+                                    "tradutor",
+                                    "SQLite não suporta ALTER COLUMN diretamente sem recriação de tabela.",
+                                    op.intervalo
+                                )
+                            } senao se (isto.dialeto == DialetoSQL.MySQL) {
+                                sAlt = sAlt + "MODIFY COLUMN " + isto.traduzirDefinicaoColuna(op.colunaDef, res)
+                            } senao {
+                                sAlt = sAlt + "ALTER COLUMN " + isto.ident(op.nomeColuna) + " TYPE " + isto.traduzirTipoColuna(op.colunaDef)
+                            }
+                        caso Ast.TipoAlteracao.RemoverColuna:
+                            sAlt = sAlt + "DROP COLUMN " + isto.ident(op.nomeColuna)
+                        caso Ast.TipoAlteracao.RenomearColuna:
+                            sAlt = sAlt + "RENAME COLUMN " + isto.ident(op.nomeColuna) + " TO " + isto.ident(op.novoNomeColuna)
+                        caso Ast.TipoAlteracao.AdicionarChaveEstrangeira:
+                            se (isto.dialeto == DialetoSQL.SQLite) {
+                                res.diagnosticos.erro(
+                                    "TRD002",
+                                    "tradutor",
+                                    "SQLite não suporta ADD CONSTRAINT FOREIGN KEY via ALTER TABLE.",
+                                    op.intervalo
+                                )
+                            } senao {
+                                sAlt = sAlt + "ADD CONSTRAINT " + isto.ident(op.nomeRestricao) + " FOREIGN KEY (" + isto.ident(op.nomeColuna) + ") REFERENCES " + isto.ident(op.tabelaRef) + "(" + isto.ident(op.colunaRef) + ")"
+                            }
+                        caso Ast.TipoAlteracao.AdicionarUnica:
+                            sAlt = sAlt + "ADD CONSTRAINT " + isto.ident(op.nomeRestricao) + " UNIQUE (" + isto.ident(op.nomeColuna) + ")"
+                        caso Ast.TipoAlteracao.RemoverRestricao:
+                            sAlt = sAlt + "DROP CONSTRAINT " + isto.ident(op.nomeRestricao)
+                    }
+                }
+                res.sql = sAlt
+            caso Ast.TipoComando.RemoverEntidade:
+                var entR: texto = cmd.entidadeTipo == "VISAO" ? "VIEW" : "TABLE"
+                var sRem: texto = "DROP ${entR} "
+                se (cmd.seExistir) { sRem = sRem + "IF EXISTS " }
+                res.sql = sRem + isto.ident(cmd.tabela)
+            caso Ast.TipoComando.Inserir:
+                var sIns: texto = "INSERT INTO " + isto.ident(cmd.tabela)
+                se (cmd.colunasNomes.tamanho() > 0) {
+                    sIns = sIns + " ("
+                    para (var ci: inteiro = 0; ci < cmd.colunasNomes.tamanho(); ci = ci + 1) {
+                        se (ci > 0) { sIns = sIns + ", " }
+                        sIns = sIns + isto.ident(cmd.colunasNomes[ci])
+                    }
+                    sIns = sIns + ")"
+                }
+                sIns = sIns + " VALUES "
+                para (var li: inteiro = 0; li < cmd.linhasValores.tamanho(); li = li + 1) {
+                    se (li > 0) { sIns = sIns + ", " }
+                    var linha: Ast.Expressao[] = cmd.linhasValores[li]
+                    sIns = sIns + "("
+                    para (var vi: inteiro = 0; vi < linha.tamanho(); vi = vi + 1) {
+                        se (vi > 0) { sIns = sIns + ", " }
+                        sIns = sIns + isto.traduzirExpressao(linha[vi], res)
+                    }
+                    sIns = sIns + ")"
+                }
+                res.sql = sIns
+            caso Ast.TipoComando.Selecionar:
+                var sSel: texto = "SELECT "
+                se (cmd.distinto) { sSel = sSel + "DISTINCT " }
+                para (var si: inteiro = 0; si < cmd.itensSelecao.tamanho(); si = si + 1) {
+                    se (si > 0) { sSel = sSel + ", " }
+                    var item: Ast.ItemSelecao = cmd.itensSelecao[si]
+                    sSel = sSel + isto.traduzirExpressao(item.expressao, res)
+                    se (item.apelido != "") {
+                        sSel = sSel + " AS " + isto.ident(item.apelido)
+                    }
+                }
+                se (cmd.tabela != "") {
+                    sSel = sSel + " FROM " + isto.ident(cmd.tabela)
+                    se (cmd.apelidoTabela != "") {
+                        sSel = sSel + " AS " + isto.ident(cmd.apelidoTabela)
+                    }
+                }
+                para (var ji: inteiro = 0; ji < cmd.juncoes.tamanho(); ji = ji + 1) {
+                    var junc: Ast.ClausulaJuncao = cmd.juncoes[ji]
+                    sSel = sSel + " " + traduzirTipoJuncao(junc.tipoJuncao) + " " + isto.ident(junc.tabela)
+                    se (junc.apelido != "") {
+                        sSel = sSel + " AS " + isto.ident(junc.apelido)
+                    }
+                    se (junc.condicao != nulo) {
+                        sSel = sSel + " ON " + isto.traduzirExpressao(junc.condicao, res)
+                    }
+                }
+                se (cmd.condicaoOnde != nulo) {
+                    sSel = sSel + " WHERE " + isto.traduzirExpressao(cmd.condicaoOnde, res)
+                }
+                se (cmd.agruparPor.tamanho() > 0) {
+                    sSel = sSel + " GROUP BY "
+                    para (var gi: inteiro = 0; gi < cmd.agruparPor.tamanho(); gi = gi + 1) {
+                        se (gi > 0) { sSel = sSel + ", " }
+                        sSel = sSel + isto.traduzirExpressao(cmd.agruparPor[gi], res)
+                    }
+                }
+                se (cmd.condicaoTendo != nulo) {
+                    sSel = sSel + " HAVING " + isto.traduzirExpressao(cmd.condicaoTendo, res)
+                }
+                se (cmd.ordenarPor.tamanho() > 0) {
+                    sSel = sSel + " ORDER BY "
+                    para (var oi: inteiro = 0; oi < cmd.ordenarPor.tamanho(); oi = oi + 1) {
+                        se (oi > 0) { sSel = sSel + ", " }
+                        var ord: Ast.ItemOrdenacao = cmd.ordenarPor[oi]
+                        sSel = sSel + isto.traduzirExpressao(ord.expressao, res)
+                        sSel = sSel + (ord.descendente ? " DESC" : " ASC")
+                    }
+                }
+                se (cmd.limite >= 0) {
+                    sSel = sSel + " LIMIT " + texto(cmd.limite)
+                    se (cmd.deslocamento > 0) {
+                        sSel = sSel + " OFFSET " + texto(cmd.deslocamento)
+                    }
+                }
+                res.sql = sSel
+            caso Ast.TipoComando.Atualizar:
+                var sAtu: texto = "UPDATE " + isto.ident(cmd.tabela) + " SET "
+                para (var ai: inteiro = 0; ai < cmd.atribuicoes.tamanho(); ai = ai + 1) {
+                    se (ai > 0) { sAtu = sAtu + ", " }
+                    var atr: Ast.AtribuicaoAst = cmd.atribuicoes[ai]
+                    sAtu = sAtu + isto.ident(atr.coluna) + " = " + isto.traduzirExpressao(atr.valor, res)
+                }
+                se (cmd.condicaoOnde != nulo) {
+                    sAtu = sAtu + " WHERE " + isto.traduzirExpressao(cmd.condicaoOnde, res)
+                }
+                res.sql = sAtu
+            caso Ast.TipoComando.Excluir:
+                var sExc: texto = "DELETE FROM " + isto.ident(cmd.tabela)
+                se (cmd.condicaoOnde != nulo) {
+                    sExc = sExc + " WHERE " + isto.traduzirExpressao(cmd.condicaoOnde, res)
+                }
+                res.sql = sExc
+            caso Ast.TipoComando.CriarIndice:
+                var sCi: texto = "CREATE "
+                se (cmd.indiceUnico) { sCi = sCi + "UNIQUE " }
+                sCi = sCi + "INDEX "
+                se (cmd.seNaoExistir) { sCi = sCi + "IF NOT EXISTS " }
+                sCi = sCi + isto.ident(cmd.nomeIndice) + " ON " + isto.ident(cmd.tabela) + " ("
+                para (var ici: inteiro = 0; ici < cmd.colunasNomes.tamanho(); ici = ici + 1) {
+                    se (ici > 0) { sCi = sCi + ", " }
+                    sCi = sCi + isto.ident(cmd.colunasNomes[ici])
+                }
+                res.sql = sCi + ")"
+            caso Ast.TipoComando.RemoverIndice:
+                var sRi: texto = "DROP INDEX "
+                se (cmd.seExistir) { sRi = sRi + "IF EXISTS " }
+                res.sql = sRi + isto.ident(cmd.nomeIndice)
+            caso Ast.TipoComando.Transacao:
+                escolha (cmd.tipoTransacao) {
+                    caso Ast.TipoTransacao.Iniciar:
+                        res.sql = isto.dialeto == DialetoSQL.MySQL ? "START TRANSACTION" : "BEGIN TRANSACTION"
+                    caso Ast.TipoTransacao.Confirmar: res.sql = "COMMIT"
+                    caso Ast.TipoTransacao.Reverter: res.sql = "ROLLBACK"
+                    caso Ast.TipoTransacao.PontoSalvamento: res.sql = "SAVEPOINT " + isto.ident(cmd.nomePonto)
+                    caso Ast.TipoTransacao.ReverterPara: res.sql = "ROLLBACK TO SAVEPOINT " + isto.ident(cmd.nomePonto)
+                    caso Ast.TipoTransacao.LiberarPonto: res.sql = "RELEASE SAVEPOINT " + isto.ident(cmd.nomePonto)
+                }
+            caso Ast.TipoComando.Explicar:
+                se (cmd.comandoAlvo != nulo) {
+                    var sub = isto.traduzirComando(cmd.comandoAlvo)
+                    res.parametros = sub.parametros
+                    se (isto.dialeto == DialetoSQL.SQLite) {
+                        res.sql = "EXPLAIN QUERY PLAN " + sub.sql
+                    } senao se (isto.dialeto == DialetoSQL.PostgreSQL e cmd.analisarExecucao) {
+                        res.sql = "EXPLAIN ANALYZE " + sub.sql
+                    } senao {
+                        res.sql = "EXPLAIN " + sub.sql
+                    }
+                }
+        }
+        retorna res
+    }
+}

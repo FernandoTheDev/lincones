@@ -1,0 +1,5 @@
+modulo utilitarios.saudacao
+
+funcao cumprimentar(alvo: texto): texto {
+    retorna "Olá, " + alvo + "!"
+}

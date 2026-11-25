@@ -1,0 +1,199 @@
+modulo catalogo.esquema
+
+importar tipos.valor como Val
+
+// Definição de coluna em uma tabela do catálogo.
+classe DefinicaoColuna {
+    nome: texto
+    tipoDado: Val.TipoDado
+    tamanho: inteiro
+    precisao: inteiro
+    escala: inteiro
+    permiteNulo: logico
+    chavePrimaria: logico
+    autoIncremento: logico
+    unica: logico
+    temPadrao: logico
+    valorPadrao: Val.Valor
+    referenciaTabela: texto
+    referenciaColuna: texto
+
+    construtor(
+        nome: texto,
+        tipoDado: Val.TipoDado,
+        tamanho: inteiro = 0,
+        permiteNulo: logico = verdadeiro,
+        chavePrimaria: logico = falso,
+        autoIncremento: logico = falso,
+        unica: logico = falso
+    ) {
+        isto.nome = nome
+        isto.tipoDado = tipoDado
+        isto.tamanho = tamanho
+        isto.precisao = 0
+        isto.escala = 0
+        isto.permiteNulo = chavePrimaria ? falso : permiteNulo
+        isto.chavePrimaria = chavePrimaria
+        isto.autoIncremento = autoIncremento
+        isto.unica = chavePrimaria ? verdadeiro : unica
+        isto.temPadrao = falso
+        isto.valorPadrao = Val.Valor.nuloVal()
+        isto.referenciaTabela = ""
+        isto.referenciaColuna = ""
+    }
+}
+
+// Definição de índice persistente (B+ Tree) ou externo.
+classe DefinicaoIndice {
+    nome: texto
+    tabela: texto
+    colunas: texto[]
+    unico: logico
+    paginaRaiz: inteiro
+
+    construtor(nome: texto, tabela: texto, colunas: texto[], unico: logico = falso, paginaRaiz: inteiro = 0) {
+        isto.nome = nome
+        isto.tabela = tabela
+        isto.colunas = colunas
+        isto.unico = unico
+        isto.paginaRaiz = paginaRaiz
+    }
+}
+
+// Definição completa de tabela no catálogo.
+classe DefinicaoTabela {
+    nome: texto
+    idTabela: inteiro
+    paginaRaizDados: inteiro
+    proximoAutoInc: inteiro
+    colunas: DefinicaoColuna[]
+    indices: DefinicaoIndice[]
+    estimativaLinhas: inteiro
+
+    construtor(nome: texto, idTabela: inteiro = 0, paginaRaizDados: inteiro = 0) {
+        isto.nome = nome
+        isto.idTabela = idTabela
+        isto.paginaRaizDados = paginaRaizDados
+        isto.proximoAutoInc = 1
+        isto.colunas = []
+        isto.indices = []
+        isto.estimativaLinhas = 0
+    }
+
+    adicionarColuna(col: DefinicaoColuna): vazio {
+        isto.colunas.adicionar(col)
+    }
+
+    indiceColuna(nomeCol: texto): inteiro {
+        var alvo: texto = nomeCol.minusculo()
+        para (var i: inteiro = 0; i < isto.colunas.tamanho(); i = i + 1) {
+            se (isto.colunas[i].nome.minusculo() == alvo) {
+                retorna i
+            }
+        }
+        retorna -1
+    }
+
+    obterColuna(nomeCol: texto): qualquer {
+        var idx: inteiro = isto.indiceColuna(nomeCol)
+        se (idx < 0) {
+            retorna nulo
+        }
+        retorna isto.colunas[idx]
+    }
+
+    indiceChavePrimaria(): inteiro {
+        para (var i: inteiro = 0; i < isto.colunas.tamanho(); i = i + 1) {
+            se (isto.colunas[i].chavePrimaria) {
+                retorna i
+            }
+        }
+        retorna -1
+    }
+
+    obterIndicePorColuna(nomeCol: texto): qualquer {
+        var alvo: texto = nomeCol.minusculo()
+        para (var i: inteiro = 0; i < isto.indices.tamanho(); i = i + 1) {
+            var ind: DefinicaoIndice = isto.indices[i]
+            se (ind.colunas.tamanho() > 0 e ind.colunas[0].minusculo() == alvo) {
+                retorna ind
+            }
+        }
+        retorna nulo
+    }
+}
+
+// Catálogo abstrato compartilhado pela análise semântica, otimizador, conectores e SGBD próprio.
+classe Catalogo {
+    tabelas: DefinicaoTabela[]
+    versaoEsquema: inteiro
+    proximoIdTabela: inteiro
+
+    construtor() {
+        isto.tabelas = []
+        isto.versaoEsquema = 1
+        isto.proximoIdTabela = 1
+    }
+
+    indiceTabela(nome: texto): inteiro {
+        var alvo: texto = nome.minusculo()
+        para (var i: inteiro = 0; i < isto.tabelas.tamanho(); i = i + 1) {
+            se (isto.tabelas[i].nome.minusculo() == alvo) {
+                retorna i
+            }
+        }
+        retorna -1
+    }
+
+    existeTabela(nome: texto): logico {
+        retorna isto.indiceTabela(nome) >= 0
+    }
+
+    obterTabela(nome: texto): qualquer {
+        var idx: inteiro = isto.indiceTabela(nome)
+        se (idx < 0) {
+            retorna nulo
+        }
+        retorna isto.tabelas[idx]
+    }
+
+    registrarTabela(tab: DefinicaoTabela): vazio {
+        se (tab.idTabela <= 0) {
+            tab.idTabela = isto.proximoIdTabela
+            isto.proximoIdTabela = isto.proximoIdTabela + 1
+        } senao se (tab.idTabela >= isto.proximoIdTabela) {
+            isto.proximoIdTabela = tab.idTabela + 1
+        }
+        var idx: inteiro = isto.indiceTabela(tab.nome)
+        se (idx >= 0) {
+            isto.tabelas[idx] = tab
+        } senao {
+            isto.tabelas.adicionar(tab)
+        }
+        isto.versaoEsquema = isto.versaoEsquema + 1
+    }
+
+    removerTabela(nome: texto): logico {
+        var idx: inteiro = isto.indiceTabela(nome)
+        se (idx < 0) {
+            retorna falso
+        }
+        var novas: DefinicaoTabela[] = []
+        para (var i: inteiro = 0; i < isto.tabelas.tamanho(); i = i + 1) {
+            se (i != idx) {
+                novas.adicionar(isto.tabelas[i])
+            }
+        }
+        isto.tabelas = novas
+        isto.versaoEsquema = isto.versaoEsquema + 1
+        retorna verdadeiro
+    }
+
+    nomesTabelas(): texto[] {
+        var nomes: texto[] = []
+        para (var i: inteiro = 0; i < isto.tabelas.tamanho(); i = i + 1) {
+            nomes.adicionar(isto.tabelas[i].nome)
+        }
+        retorna nomes
+    }
+}

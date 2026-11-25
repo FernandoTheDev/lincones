@@ -1,0 +1,16 @@
+modulo traducao.postgresql.tradutor
+
+importar ast.nos como Ast
+importar traducao.resultado como Res
+
+classe TradutorPostgreSQL {
+    base: Res.TradutorBase
+
+    construtor(delimitarIdentificadores: logico = falso) {
+        isto.base = Res.TradutorBase(Res.DialetoSQL.PostgreSQL, delimitarIdentificadores)
+    }
+
+    traduzir(cmd: Ast.Comando): Res.ResultadoTraducao {
+        retorna isto.base.traduzirComando(cmd)
+    }
+}

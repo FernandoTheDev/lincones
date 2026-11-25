@@ -1,0 +1,98 @@
+modulo conectores.postgresql_conector
+
+importar sintatico.parser como Par
+importar ast.nos como Ast
+importar traducao.postgresql.tradutor como TradPg
+
+// Integração opcional com libpq via compilação condicional (--recurso postgresql).
+// Mantém o binário principal livre de dependência obrigatória de libpq.
+@quando(Compilacao.temRecurso("postgresql"))
+@definicao(biblioteca = "pq", abi = "c")
+classe estrangeira LibPQ {
+    @definicao(simbolo = "PQconnectdb")
+    estatico conectar(conninfo: texto): cu64;
+    @definicao(simbolo = "PQstatus")
+    estatico status(conn: cu64): cint;
+    @definicao(simbolo = "PQerrorMessage")
+    estatico mensagemErro(conn: cu64): texto;
+    @definicao(simbolo = "PQexec")
+    estatico executar(conn: cu64, sql: texto): cu64;
+    @definicao(simbolo = "PQresultStatus")
+    estatico statusResultado(res: cu64): cint;
+    @definicao(simbolo = "PQntuples")
+    estatico numLinhas(res: cu64): cint;
+    @definicao(simbolo = "PQnfields")
+    estatico numColunas(res: cu64): cint;
+    @definicao(simbolo = "PQfname")
+    estatico nomeColuna(res: cu64, col: cint): texto;
+    @definicao(simbolo = "PQgetvalue")
+    estatico valorCelula(res: cu64, lin: cint, col: cint): texto;
+    @definicao(simbolo = "PQgetisnull")
+    estatico ehNuloCelula(res: cu64, lin: cint, col: cint): cint;
+    @definicao(simbolo = "PQclear")
+    estatico limparResultado(res: cu64): vazio;
+    @definicao(simbolo = "PQfinish")
+    estatico finalizar(conn: cu64): vazio;
+}
+
+classe ConectorPostgreSQL {
+    tradutor: TradPg.TradutorPostgreSQL
+    connHandle: inteiro
+    aberto: logico
+
+    construtor() {
+        isto.tradutor = TradPg.TradutorPostgreSQL(falso)
+        isto.connHandle = 0
+        isto.aberto = falso
+    }
+
+    traduzirLinConEs(codigo: texto): texto {
+        var parsed = Par.AnalisadorSintatico.analisarCodigo(codigo, "", falso)
+        se (parsed.diagnosticos.temErros()) {
+            falhar "Erro ao analisar LinConEs: " + parsed.diagnosticos.formatarTodos()
+        }
+        var saida: texto = ""
+        para (var i: inteiro = 0; i < parsed.comandos.tamanho(); i = i + 1) {
+            var trad = isto.tradutor.traduzir(parsed.comandos[i])
+            se (trad.temErros()) {
+                falhar "Erro na tradução PostgreSQL: " + trad.diagnosticos.formatarTodos()
+            }
+            se (i > 0) { saida = saida + ";\n" }
+            saida = saida + trad.sql
+        }
+        retorna saida
+    }
+
+    @quando(Compilacao.temRecurso("postgresql"))
+    conectar(conninfo: texto): vazio {
+        isto.connHandle = LibPQ.conectar(conninfo)
+        se (isto.connHandle == 0 ou LibPQ.status(isto.connHandle) != 0) {
+            var msg: texto = isto.connHandle != 0 ? LibPQ.mensagemErro(isto.connHandle) : "falha ao alocar conexão libpq"
+            se (isto.connHandle != 0) {
+                LibPQ.finalizar(isto.connHandle)
+                isto.connHandle = 0
+            }
+            falhar "Falha ao conectar ao PostgreSQL (credenciais omitidas): " + msg
+        }
+        isto.aberto = verdadeiro
+    }
+
+    @quando(!Compilacao.temRecurso("postgresql"))
+    conectar(conninfo: texto): vazio {
+        falhar "Conector PostgreSQL (libpq) não habilitado nesta compilação. Recompile com '--recurso postgresql'."
+    }
+
+    @quando(Compilacao.temRecurso("postgresql"))
+    fechar(): vazio {
+        se (isto.aberto e isto.connHandle != 0) {
+            LibPQ.finalizar(isto.connHandle)
+            isto.connHandle = 0
+            isto.aberto = falso
+        }
+    }
+
+    @quando(!Compilacao.temRecurso("postgresql"))
+    fechar(): vazio {
+        isto.aberto = falso
+    }
+}

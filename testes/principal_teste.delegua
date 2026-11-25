@@ -1,0 +1,4 @@
+importar utilitarios.saudacao
+
+assercao(utilitarios.saudacao.cumprimentar("CGD") == "Olá, CGD!")
+escreva("OK")

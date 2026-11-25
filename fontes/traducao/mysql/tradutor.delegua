@@ -1,0 +1,16 @@
+modulo traducao.mysql.tradutor
+
+importar ast.nos como Ast
+importar traducao.resultado como Res
+
+classe TradutorMySQL {
+    base: Res.TradutorBase
+
+    construtor(delimitarIdentificadores: logico = falso) {
+        isto.base = Res.TradutorBase(Res.DialetoSQL.MySQL, delimitarIdentificadores)
+    }
+
+    traduzir(cmd: Ast.Comando): Res.ResultadoTraducao {
+        retorna isto.base.traduzirComando(cmd)
+    }
+}

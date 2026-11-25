@@ -1,0 +1,39 @@
+modulo conectores.mysql_conector
+
+importar sintatico.parser como Par
+importar traducao.mysql.tradutor como TradMy
+
+classe ConectorMySQL {
+    tradutor: TradMy.TradutorMySQL
+    aberto: logico
+
+    construtor() {
+        isto.tradutor = TradMy.TradutorMySQL(falso)
+        isto.aberto = falso
+    }
+
+    traduzirLinConEs(codigo: texto): texto {
+        var parsed = Par.AnalisadorSintatico.analisarCodigo(codigo, "", falso)
+        se (parsed.diagnosticos.temErros()) {
+            falhar "Erro ao analisar LinConEs: " + parsed.diagnosticos.formatarTodos()
+        }
+        var saida: texto = ""
+        para (var i: inteiro = 0; i < parsed.comandos.tamanho(); i = i + 1) {
+            var trad = isto.tradutor.traduzir(parsed.comandos[i])
+            se (trad.temErros()) {
+                falhar "Erro na tradução MySQL: " + trad.diagnosticos.formatarTodos()
+            }
+            se (i > 0) { saida = saida + ";\n" }
+            saida = saida + trad.sql
+        }
+        retorna saida
+    }
+
+    conectar(host: texto, porta: inteiro, usuario: texto, banco: texto): vazio {
+        falhar "Conector MySQL/MariaDB nativo requer biblioteca de desenvolvimento libmariadb/libmysqlclient habilitada."
+    }
+
+    fechar(): vazio {
+        isto.aberto = falso
+    }
+}

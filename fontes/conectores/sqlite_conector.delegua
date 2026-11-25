@@ -1,0 +1,123 @@
+modulo conectores.sqlite_conector
+
+importar cgd.dados.sqlite como Sql
+importar sintatico.parser como Par
+importar ast.nos como Ast
+importar traducao.sqlite.tradutor como TradSql
+importar catalogo.esquema como Cat
+importar tipos.valor como Val
+
+classe ResultadoExecucaoExterna {
+    colunas: texto[]
+    linhas: dicionario[]
+    linhasAfetadas: inteiro
+    ultimoId: inteiro
+    sqlExecutado: texto
+
+    construtor(sqlExecutado: texto = "") {
+        isto.colunas = []
+        isto.linhas = []
+        isto.linhasAfetadas = 0
+        isto.ultimoId = 0
+        isto.sqlExecutado = sqlExecutado
+    }
+}
+
+classe ConectorSQLite {
+    banco: qualquer
+    caminho: texto
+    aberto: logico
+    tradutor: TradSql.TradutorSQLite
+
+    construtor(caminho: texto = ":memory:") {
+        isto.caminho = caminho
+        isto.banco = Sql.SQLite.abrir(caminho)
+        isto.aberto = verdadeiro
+        isto.tradutor = TradSql.TradutorSQLite(falso)
+        // Habilita chaves estrangeiras por padrão no SQLite
+        isto.banco.executar("PRAGMA foreign_keys = ON")
+    }
+
+    normalizarParametros(params: qualquer[]): qualquer[] {
+        var norm: qualquer[] = []
+        para (var i: inteiro = 0; i < params.tamanho(); i = i + 1) {
+            var p: qualquer = params[i]
+            se (p == verdadeiro) {
+                norm.adicionar(1)
+            } senao se (p == falso) {
+                norm.adicionar(0)
+            } senao {
+                norm.adicionar(p)
+            }
+        }
+        retorna norm
+    }
+
+    executarLinConEs(codigo: texto, parametros: qualquer[] = []): ResultadoExecucaoExterna {
+        var parsed = Par.AnalisadorSintatico.analisarCodigo(codigo, "", falso)
+        se (parsed.diagnosticos.temErros()) {
+            falhar "Erro ao analisar LinConEs: " + parsed.diagnosticos.formatarTodos()
+        }
+        var ultimoRes = ResultadoExecucaoExterna("")
+        var normParams: qualquer[] = isto.normalizarParametros(parametros)
+        para (var i: inteiro = 0; i < parsed.comandos.tamanho(); i = i + 1) {
+            var cmd: Ast.Comando = parsed.comandos[i]
+            var trad = isto.tradutor.traduzir(cmd)
+            se (trad.temErros()) {
+                falhar "Erro na tradução SQLite: " + trad.diagnosticos.formatarTodos()
+            }
+            ultimoRes = ResultadoExecucaoExterna(trad.sql)
+            se (cmd.tipoCmd == Ast.TipoComando.Selecionar ou cmd.tipoCmd == Ast.TipoComando.Explicar) {
+                ultimoRes.linhas = isto.banco.consultar(trad.sql, normParams)
+            } senao {
+                ultimoRes.linhasAfetadas = isto.banco.executar(trad.sql, normParams)
+                ultimoRes.ultimoId = isto.banco.ultimoId()
+            }
+        }
+        retorna ultimoRes
+    }
+
+    introspeccaoCatalogo(): Cat.Catalogo {
+        var cat = Cat.Catalogo()
+        var tabs: dicionario[] = isto.banco.consultar("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        para (var i: inteiro = 0; i < tabs.tamanho(); i = i + 1) {
+            var nomeTab: texto = texto(tabs[i]["name"])
+            var defTab = Cat.DefinicaoTabela(nomeTab)
+            var cols: dicionario[] = isto.banco.consultar("PRAGMA table_info(\"" + nomeTab.substituir("\"", "\"\"") + "\")")
+            para (var c: inteiro = 0; c < cols.tamanho(); c = c + 1) {
+                var nomeCol: texto = texto(cols[c]["name"])
+                var tipoStr: texto = texto(cols[c]["type"]).maiusculo()
+                var td: Val.TipoDado = Val.TipoDado.Texto
+                se (tipoStr.inclui("INT")) { td = Val.TipoDado.Inteiro }
+                senao se (tipoStr.inclui("REAL") ou tipoStr.inclui("FLOA") ou tipoStr.inclui("DOUB")) { td = Val.TipoDado.Real }
+                senao se (tipoStr.inclui("NUM") ou tipoStr.inclui("DEC")) { td = Val.TipoDado.Decimal }
+                senao se (tipoStr.inclui("BOOL")) { td = Val.TipoDado.Logico }
+                senao se (tipoStr.inclui("BLOB")) { td = Val.TipoDado.Binario }
+                var notNull: logico = inteiro(cols[c]["notnull"]) != 0
+                var pk: logico = inteiro(cols[c]["pk"]) != 0
+                defTab.adicionarColuna(Cat.DefinicaoColuna(nomeCol, td, 0, !notNull, pk, falso, pk))
+            }
+            cat.registrarTabela(defTab)
+        }
+        retorna cat
+    }
+
+    iniciarTransacao(): vazio {
+        isto.banco.iniciarTransacao()
+    }
+
+    confirmar(): vazio {
+        isto.banco.confirmar()
+    }
+
+    reverter(): vazio {
+        isto.banco.reverter()
+    }
+
+    fechar(): vazio {
+        se (isto.aberto) {
+            isto.banco.fechar()
+            isto.aberto = falso
+        }
+    }
+}

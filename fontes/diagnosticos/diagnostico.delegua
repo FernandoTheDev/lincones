@@ -1,0 +1,157 @@
+modulo diagnosticos.diagnostico
+
+// Níveis de severidade de diagnóstico.
+enum NivelDiagnostico {
+    Informacao,
+    Aviso,
+    Erro
+}
+
+// Posição exata no código-fonte.
+classe Posicao {
+    arquivo: texto
+    linha: inteiro
+    coluna: inteiro
+    deslocamento: inteiro
+
+    construtor(arquivo: texto, linha: inteiro, coluna: inteiro, deslocamento: inteiro) {
+        isto.arquivo = arquivo
+        isto.linha = linha
+        isto.coluna = coluna
+        isto.deslocamento = deslocamento
+    }
+
+    paraTexto(): texto {
+        se (isto.arquivo != "") {
+            retorna "${isto.arquivo}:${isto.linha}:${isto.coluna}"
+        }
+        retorna "linha ${isto.linha}, coluna ${isto.coluna}"
+    }
+}
+
+// Intervalo de origem no código-fonte.
+classe Intervalo {
+    arquivo: texto
+    linhaInicio: inteiro
+    colunaInicio: inteiro
+    deslocamentoInicio: inteiro
+    deslocamentoFim: inteiro
+
+    construtor(
+        arquivo: texto,
+        linhaInicio: inteiro,
+        colunaInicio: inteiro,
+        deslocamentoInicio: inteiro,
+        deslocamentoFim: inteiro
+    ) {
+        isto.arquivo = arquivo
+        isto.linhaInicio = linhaInicio
+        isto.colunaInicio = colunaInicio
+        isto.deslocamentoInicio = deslocamentoInicio
+        isto.deslocamentoFim = deslocamentoFim
+    }
+
+    estatico vazio(): Intervalo {
+        retorna Intervalo("", 1, 1, 0, 0)
+    }
+
+    paraTexto(): texto {
+        se (isto.arquivo != "") {
+            retorna "${isto.arquivo}:${isto.linhaInicio}:${isto.colunaInicio}"
+        }
+        retorna "${isto.linhaInicio}:${isto.colunaInicio}"
+    }
+}
+
+// Diagnóstico estruturado com código, fase, localização e sugestão opcional.
+classe Diagnostico {
+    nivel: NivelDiagnostico
+    codigo: texto
+    fase: texto
+    mensagem: texto
+    intervalo: Intervalo
+    dica: texto
+
+    construtor(
+        nivel: NivelDiagnostico,
+        codigo: texto,
+        fase: texto,
+        mensagem: texto,
+        intervalo: Intervalo,
+        dica: texto = ""
+    ) {
+        isto.nivel = nivel
+        isto.codigo = codigo
+        isto.fase = fase
+        isto.mensagem = mensagem
+        isto.intervalo = intervalo
+        isto.dica = dica
+    }
+
+    nomeNivel(): texto {
+        se (isto.nivel == NivelDiagnostico.Erro) {
+            retorna "erro"
+        }
+        se (isto.nivel == NivelDiagnostico.Aviso) {
+            retorna "aviso"
+        }
+        retorna "info"
+    }
+
+    formatar(): texto {
+        var base: texto = "${isto.nomeNivel()}[${isto.codigo}] (${isto.fase}) em ${isto.intervalo.paraTexto()}: ${isto.mensagem}"
+        se (isto.dica != "") {
+            retorna base + "\n  dica: " + isto.dica
+        }
+        retorna base
+    }
+}
+
+// Acumulador de diagnósticos durante análise, tradução ou execução.
+classe ColetorDiagnosticos {
+    itens: Diagnostico[]
+    quantidadeErros: inteiro
+    quantidadeAvisos: inteiro
+
+    construtor() {
+        isto.itens = []
+        isto.quantidadeErros = 0
+        isto.quantidadeAvisos = 0
+    }
+
+    adicionar(diag: Diagnostico): vazio {
+        isto.itens.adicionar(diag)
+        se (diag.nivel == NivelDiagnostico.Erro) {
+            isto.quantidadeErros = isto.quantidadeErros + 1
+        } senao se (diag.nivel == NivelDiagnostico.Aviso) {
+            isto.quantidadeAvisos = isto.quantidadeAvisos + 1
+        }
+    }
+
+    erro(codigo: texto, fase: texto, mensagem: texto, intervalo: Intervalo, dica: texto = ""): vazio {
+        isto.adicionar(Diagnostico(NivelDiagnostico.Erro, codigo, fase, mensagem, intervalo, dica))
+    }
+
+    aviso(codigo: texto, fase: texto, mensagem: texto, intervalo: Intervalo, dica: texto = ""): vazio {
+        isto.adicionar(Diagnostico(NivelDiagnostico.Aviso, codigo, fase, mensagem, intervalo, dica))
+    }
+
+    info(codigo: texto, fase: texto, mensagem: texto, intervalo: Intervalo, dica: texto = ""): vazio {
+        isto.adicionar(Diagnostico(NivelDiagnostico.Informacao, codigo, fase, mensagem, intervalo, dica))
+    }
+
+    temErros(): logico {
+        retorna isto.quantidadeErros > 0
+    }
+
+    formatarTodos(): texto {
+        var saida: texto = ""
+        para (var i: inteiro = 0; i < isto.itens.tamanho(); i = i + 1) {
+            se (i > 0) {
+                saida = saida + "\n"
+            }
+            saida = saida + isto.itens[i].formatar()
+        }
+        retorna saida
+    }
+}

@@ -1,0 +1,177 @@
+modulo semantico.analisador
+
+importar diagnosticos.diagnostico como Diag
+importar ast.nos como Ast
+importar catalogo.esquema como Cat
+importar tipos.valor como Val
+
+// Analisador semântico independente de dialeto.
+// Opera sobre o catálogo quando disponível; quando `catalogo == nulo`, executa verificações
+// independentes de catálogo (estrutura de restrições, aridade de colunas/valores, funções conhecidas).
+classe AnalisadorSemantico {
+    catalogo: qualquer
+    diagnosticos: Diag.ColetorDiagnosticos
+
+    construtor(catalogo: qualquer, diagnosticos: Diag.ColetorDiagnosticos) {
+        isto.catalogo = catalogo
+        isto.diagnosticos = diagnosticos
+    }
+
+    validarComando(cmd: Ast.Comando): vazio {
+        escolha (cmd.tipoCmd) {
+            caso Ast.TipoComando.CriarTabela: isto.validarCriarTabela(cmd)
+            caso Ast.TipoComando.Inserir: isto.validarInserir(cmd)
+            caso Ast.TipoComando.Selecionar: isto.validarSelecionar(cmd)
+            caso Ast.TipoComando.Atualizar: isto.validarAtualizar(cmd)
+            caso Ast.TipoComando.Excluir: isto.validarExcluir(cmd)
+            caso Ast.TipoComando.AlterarTabela: isto.validarAlterarTabela(cmd)
+            caso Ast.TipoComando.RemoverEntidade: isto.validarRemoverEntidade(cmd)
+            caso Ast.TipoComando.CriarIndice: isto.validarCriarIndice(cmd)
+            caso Ast.TipoComando.Explicar:
+                se (cmd.comandoAlvo != nulo) {
+                    isto.validarComando(cmd.comandoAlvo)
+                }
+        }
+    }
+
+    validarCriarTabela(cmd: Ast.Comando): vazio {
+        se (cmd.colunasDef.tamanho() == 0) {
+            isto.diagnosticos.erro("SEM001", "semantico", "CRIAR TABELA '${cmd.tabela}' deve declarar ao menos uma coluna.", cmd.intervalo)
+            retorna
+        }
+        var nomesVistos: texto[] = []
+        var qtdPk: inteiro = 0
+        para (var i: inteiro = 0; i < cmd.colunasDef.tamanho(); i = i + 1) {
+            var col: Ast.ColunaAst = cmd.colunasDef[i]
+            var nomeNorm: texto = col.nome.minusculo()
+            para (var j: inteiro = 0; j < nomesVistos.tamanho(); j = j + 1) {
+                se (nomesVistos[j] == nomeNorm) {
+                    isto.diagnosticos.erro("SEM002", "semantico", "Coluna duplicada '${col.nome}' na tabela '${cmd.tabela}'.", col.intervalo)
+                }
+            }
+            nomesVistos.adicionar(nomeNorm)
+            se (col.chavePrimaria) {
+                qtdPk = qtdPk + 1
+            }
+            se (col.autoIncremento e col.tipoDado != Val.TipoDado.Inteiro) {
+                isto.diagnosticos.erro("SEM003", "semantico", "AUTO INCREMENTO exige coluna do tipo INTEIRO em '${col.nome}'.", col.intervalo)
+            }
+        }
+        se (qtdPk > 1) {
+            isto.diagnosticos.erro("SEM004", "semantico", "Mais de uma coluna declarada como CHAVE PRIMARIA individual em '${cmd.tabela}'.", cmd.intervalo)
+        }
+        se (isto.catalogo != nulo e !cmd.seNaoExistir e isto.catalogo.existeTabela(cmd.tabela)) {
+            isto.diagnosticos.erro("SEM005", "semantico", "A tabela '${cmd.tabela}' já existe no catálogo.", cmd.intervalo)
+        }
+    }
+
+    validarInserir(cmd: Ast.Comando): vazio {
+        se (cmd.linhasValores.tamanho() == 0) {
+            isto.diagnosticos.erro("SEM010", "semantico", "INSERIR EM '${cmd.tabela}' deve fornecer ao menos uma linha de valores.", cmd.intervalo)
+            retorna
+        }
+        var qtdColunasInformadas: inteiro = cmd.colunasNomes.tamanho()
+        para (var i: inteiro = 0; i < cmd.linhasValores.tamanho(); i = i + 1) {
+            var linha: Ast.Expressao[] = cmd.linhasValores[i]
+            se (qtdColunasInformadas > 0 e linha.tamanho() != qtdColunasInformadas) {
+                isto.diagnosticos.erro(
+                    "SEM011",
+                    "semantico",
+                    "Quantidade de valores (${linha.tamanho()}) difere da quantidade de colunas (${qtdColunasInformadas}) em INSERIR EM '${cmd.tabela}'.",
+                    cmd.intervalo
+                )
+            }
+        }
+        se (isto.catalogo != nulo) {
+            var tab: qualquer = isto.catalogo.obterTabela(cmd.tabela)
+            se (tab == nulo) {
+                isto.diagnosticos.erro("SEM012", "semantico", "Tabela '${cmd.tabela}' não encontrada.", cmd.intervalo)
+                retorna
+            }
+            para (var c: inteiro = 0; c < cmd.colunasNomes.tamanho(); c = c + 1) {
+                se (tab.indiceColuna(cmd.colunasNomes[c]) < 0) {
+                    isto.diagnosticos.erro("SEM013", "semantico", "Coluna '${cmd.colunasNomes[c]}' não existe na tabela '${cmd.tabela}'.", cmd.intervalo)
+                }
+            }
+        }
+    }
+
+    validarSelecionar(cmd: Ast.Comando): vazio {
+        se (cmd.itensSelecao.tamanho() == 0) {
+            isto.diagnosticos.erro("SEM020", "semantico", "SELECIONAR exige ao menos uma expressão de projeção.", cmd.intervalo)
+            retorna
+        }
+        se (isto.catalogo != nulo e cmd.tabela != "") {
+            var tab: qualquer = isto.catalogo.obterTabela(cmd.tabela)
+            se (tab == nulo) {
+                isto.diagnosticos.erro("SEM021", "semantico", "Tabela '${cmd.tabela}' não encontrada.", cmd.intervalo)
+                retorna
+            }
+            para (var j: inteiro = 0; j < cmd.juncoes.tamanho(); j = j + 1) {
+                var junc: Ast.ClausulaJuncao = cmd.juncoes[j]
+                se (isto.catalogo.obterTabela(junc.tabela) == nulo) {
+                    isto.diagnosticos.erro("SEM022", "semantico", "Tabela de junção '${junc.tabela}' não encontrada.", cmd.intervalo)
+                }
+            }
+        }
+    }
+
+    validarAtualizar(cmd: Ast.Comando): vazio {
+        se (cmd.atribuicoes.tamanho() == 0) {
+            isto.diagnosticos.erro("SEM030", "semantico", "ATUALIZAR '${cmd.tabela}' exige ao menos uma atribuição em DEFINIR.", cmd.intervalo)
+            retorna
+        }
+        se (isto.catalogo != nulo) {
+            var tab: qualquer = isto.catalogo.obterTabela(cmd.tabela)
+            se (tab == nulo) {
+                isto.diagnosticos.erro("SEM031", "semantico", "Tabela '${cmd.tabela}' não encontrada.", cmd.intervalo)
+                retorna
+            }
+            para (var i: inteiro = 0; i < cmd.atribuicoes.tamanho(); i = i + 1) {
+                var atr: Ast.AtribuicaoAst = cmd.atribuicoes[i]
+                se (tab.indiceColuna(atr.coluna) < 0) {
+                    isto.diagnosticos.erro("SEM032", "semantico", "Coluna '${atr.coluna}' não existe na tabela '${cmd.tabela}'.", atr.intervalo)
+                }
+            }
+        }
+    }
+
+    validarExcluir(cmd: Ast.Comando): vazio {
+        se (isto.catalogo != nulo e !isto.catalogo.existeTabela(cmd.tabela)) {
+            isto.diagnosticos.erro("SEM040", "semantico", "Tabela '${cmd.tabela}' não encontrada.", cmd.intervalo)
+        }
+    }
+
+    validarAlterarTabela(cmd: Ast.Comando): vazio {
+        se (cmd.operacoesAlteracao.tamanho() == 0) {
+            isto.diagnosticos.erro("SEM050", "semantico", "ALTERAR TABELA '${cmd.tabela}' exige ao menos uma operação.", cmd.intervalo)
+        }
+        se (isto.catalogo != nulo e !isto.catalogo.existeTabela(cmd.tabela)) {
+            isto.diagnosticos.erro("SEM051", "semantico", "Tabela '${cmd.tabela}' não encontrada.", cmd.intervalo)
+        }
+    }
+
+    validarRemoverEntidade(cmd: Ast.Comando): vazio {
+        se (isto.catalogo != nulo e !cmd.seExistir e !isto.catalogo.existeTabela(cmd.tabela)) {
+            isto.diagnosticos.erro("SEM060", "semantico", "Entidade '${cmd.tabela}' não encontrada para remoção.", cmd.intervalo)
+        }
+    }
+
+    validarCriarIndice(cmd: Ast.Comando): vazio {
+        se (cmd.colunasNomes.tamanho() == 0) {
+            isto.diagnosticos.erro("SEM070", "semantico", "CRIAR INDICE '${cmd.nomeIndice}' exige ao menos uma coluna.", cmd.intervalo)
+        }
+        se (isto.catalogo != nulo) {
+            var tab: qualquer = isto.catalogo.obterTabela(cmd.tabela)
+            se (tab == nulo) {
+                isto.diagnosticos.erro("SEM071", "semantico", "Tabela '${cmd.tabela}' não encontrada para criação de índice.", cmd.intervalo)
+            } senao {
+                para (var i: inteiro = 0; i < cmd.colunasNomes.tamanho(); i = i + 1) {
+                    se (tab.indiceColuna(cmd.colunasNomes[i]) < 0) {
+                        isto.diagnosticos.erro("SEM072", "semantico", "Coluna '${cmd.colunasNomes[i]}' não existe na tabela '${cmd.tabela}'.", cmd.intervalo)
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,6 @@
+modulo principal
+
+importar utilitarios.saudacao
+
+const mensagem: texto = utilitarios.saudacao.cumprimentar("lincones")
+escreva(mensagem)

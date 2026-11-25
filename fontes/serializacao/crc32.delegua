@@ -1,0 +1,39 @@
+modulo serializacao.crc32
+
+// CRC32 (IEEE 802.3, polinômio refletido 0xEDB88320) em aritmética escalar pura
+// para validação de integridade de cabeçalhos, páginas e registros WAL.
+funcao atualizarByteCrc32(crcAtual: inteiro, byteVal: inteiro): inteiro {
+    var c: inteiro = (crcAtual ^ (byteVal & 255)) & 4294967295
+    var bit: inteiro = 0
+    enquanto (bit < 8) {
+        se ((c & 1) != 0) {
+            c = ((c >> 1) ^ 3988292384) & 4294967295
+        } senao {
+            c = (c >> 1) & 4294967295
+        }
+        bit = bit + 1
+    }
+    retorna c
+}
+
+funcao calcularCrc32Vetor(dados: inteiro[], inicio: inteiro, comprimento: inteiro): inteiro {
+    var crc: inteiro = 4294967295
+    var fim: inteiro = inicio + comprimento
+    var i: inteiro = inicio
+    enquanto (i < fim) {
+        crc = atualizarByteCrc32(crc, dados[i])
+        i = i + 1
+    }
+    retorna (crc ^ 4294967295) & 4294967295
+}
+
+funcao calcularCrc32Bytes(buf: qualquer, inicio: inteiro, comprimento: inteiro): inteiro {
+    var crc: inteiro = 4294967295
+    var fim: inteiro = inicio + comprimento
+    var i: inteiro = inicio
+    enquanto (i < fim) {
+        crc = atualizarByteCrc32(crc, buf.obter(i))
+        i = i + 1
+    }
+    retorna (crc ^ 4294967295) & 4294967295
+}

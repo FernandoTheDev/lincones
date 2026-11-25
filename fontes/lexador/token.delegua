@@ -1,0 +1,138 @@
+modulo lexador.token
+
+importar diagnosticos.diagnostico como Diag
+
+// Todos os tipos de tokens oficiais do LinConEs + extensões documentadas.
+enum TipoToken {
+    // Fim de arquivo / erro
+    FimArquivo,
+    Desconhecido,
+
+    // Identificadores e literais
+    Identificador,
+    LiteralInteiro,
+    LiteralReal,
+    LiteralTexto,
+
+    // Palavras-chave oficiais (LinConEs / lincones-js)
+    Adicionar,
+    Agrupar,
+    Alterar,
+    Atualizar,
+    Auto,
+    Caracteres,
+    Chave,
+    Coluna,
+    Criar,
+    De,
+    Definir,
+    Distinto,
+    E,
+    Em,
+    Entre,
+    Estrangeira,
+    Excluir,
+    Existir,
+    Falso,
+    Identidade,
+    Incremento,
+    Inserir,
+    Inteiro,
+    Logico,
+    Media,
+    Nao,
+    Nulo,
+    Numero,
+    Onde,
+    Ordenar,
+    Padrao,
+    Para,
+    Por,
+    Primaria,
+    Referencia,
+    Remover,
+    Renomear,
+    Restricao,
+    Se,
+    Selecionar,
+    Tabela,
+    Texto,
+    Unica,
+    Valores,
+    Verdadeiro,
+    Visao,
+
+    // Palavras-chave de extensões documentadas
+    Ou,
+    Como,
+    Eh,
+    Limite,
+    Deslocamento,
+    Crescente,
+    Decrescente,
+    Tendo,
+    Juncao,
+    Interna,
+    Esquerda,
+    Direita,
+    Completa,
+    Cruzada,
+    Indice,
+    Unico,
+    Real,
+    Decimal,
+    Binario,
+    Data,
+    Horario,
+    Instante,
+    Iniciar,
+    Transacao,
+    Confirmar,
+    Reverter,
+    Ponto,
+    Salvamento,
+    Liberar,
+    Explicar,
+    Analisar,
+    Verificar,
+    Uniao,
+    Intersecao,
+    Diferenca,
+    Caso,
+    Quando,
+    Entao,
+    Senao,
+    Fim,
+
+    // Símbolos e operadores
+    ParenteseEsq,
+    ParenteseDir,
+    Virgula,
+    PontoVirgula,
+    PontoSimbolo,
+    Asterisco,
+    Mais,
+    Menos,
+    Barra,
+    Porcento,
+    Igual,
+    Diferente,
+    Maior,
+    MaiorIgual,
+    Menor,
+    MenorIgual,
+    DoisPontos,
+    Interrogacao
+}
+
+classe Token {
+    tipoToken: TipoToken
+    lexema: texto
+    intervalo: Diag.Intervalo
+
+    construtor(tipoToken: TipoToken, lexema: texto, intervalo: Diag.Intervalo) {
+        isto.tipoToken = tipoToken
+        isto.lexema = lexema
+        isto.intervalo = intervalo
+    }
+}

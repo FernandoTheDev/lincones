@@ -1,0 +1,37 @@
+importar diagnosticos.diagnostico como Diag
+importar serializacao.crc32 como Crc
+importar tipos.valor como Val
+
+funcao afirmar(condicao: logico, msg: texto): vazio {
+    se (!condicao) {
+        falhar "FALHA EM TESTE: " + msg
+    }
+}
+
+// 1. Testes de Diagnósticos
+var col = Diag.ColetorDiagnosticos()
+afirmar(!col.temErros(), "Coletor deve iniciar sem erros")
+col.erro("LCE001", "lexador", "Caractere inválido", Diag.Intervalo("teste.lincones", 1, 5, 4, 5), "Remova o caractere")
+afirmar(col.temErros(), "Coletor deve registrar erro")
+afirmar(col.quantidadeErros == 1, "Quantidade de erros deve ser 1")
+
+// 2. Testes de CRC32 IEEE 802.3 ("123456789" -> 0xCBF43926 = 3421780262)
+var dadosTeste: inteiro[] = [49, 50, 51, 52, 53, 54, 55, 56, 57]
+var crcCalc: inteiro = Crc.calcularCrc32Vetor(dadosTeste, 0, 9)
+afirmar(crcCalc == 3421780262, "CRC32 de '123456789' esperado 3421780262, obtido " + texto(crcCalc))
+
+// 3. Testes do Sistema de Tipos e Lógica Ternária
+var vInt = Val.Valor.deInteiro(42)
+var vDec1 = Val.Valor.deDecimal(1250, 2)
+var vDec2 = Val.Valor.deDecimal(12500, 3)
+var vNulo = Val.Valor.nuloVal()
+
+afirmar(vDec1.paraTexto() == "12.50", "Decimal 12.50 esperado, obtido " + vDec1.paraTexto())
+afirmar(Val.compararIgual(vDec1, vDec2) == Val.TriLogico.Verdadeiro, "12.50 deve ser igual a 12.500")
+afirmar(Val.compararIgual(vInt, vNulo) == Val.TriLogico.Desconhecido, "42 == NULO deve ser Desconhecido")
+afirmar(Val.triE(Val.TriLogico.Falso, Val.TriLogico.Desconhecido) == Val.TriLogico.Falso, "FALSO E DESCONHECIDO == FALSO")
+afirmar(Val.triOu(Val.TriLogico.Verdadeiro, Val.TriLogico.Desconhecido) == Val.TriLogico.Verdadeiro, "VERDADEIRO OU DESCONHECIDO == VERDADEIRO")
+afirmar(Val.triNao(Val.TriLogico.Desconhecido) == Val.TriLogico.Desconhecido, "NAO DESCONHECIDO == DESCONHECIDO")
+afirmar(Val.compararTotal(vNulo, vInt) < 0, "NULO deve ordenar antes de valores não nulos")
+
+escreva("fundacao_teste: OK")
