@@ -1,0 +1,272 @@
+modulo expressoes.avaliador
+
+importar ast.nos como Ast
+importar tipos.valor como Val
+
+// Contexto de avaliação de expressão sobre uma linha materializada.
+classe ContextoLinha {
+    nomesColunas: texto[]
+    tabelasColunas: texto[]
+    valores: Val.Valor[]
+    parametrosPosicionais: Val.Valor[]
+    parametrosNomeados: dicionario
+
+    construtor(
+        nomesColunas: texto[],
+        tabelasColunas: texto[],
+        valores: Val.Valor[],
+        parametrosPosicionais: Val.Valor[] = [],
+        parametrosNomeados: dicionario = {}
+    ) {
+        isto.nomesColunas = nomesColunas
+        isto.tabelasColunas = tabelasColunas
+        isto.valores = valores
+        isto.parametrosPosicionais = parametrosPosicionais
+        isto.parametrosNomeados = parametrosNomeados
+    }
+
+    buscarColuna(tabelaRef: texto, nomeCol: texto): Val.Valor {
+        var alvoCol: texto = nomeCol.minusculo()
+        var alvoTab: texto = tabelaRef.minusculo()
+        para (var i: inteiro = 0; i < isto.nomesColunas.tamanho(); i = i + 1) {
+            se (isto.nomesColunas[i].minusculo() == alvoCol) {
+                se (alvoTab == "" ou isto.tabelasColunas[i] == "" ou isto.tabelasColunas[i].minusculo() == alvoTab) {
+                    retorna isto.valores[i]
+                }
+            }
+        }
+        falhar "Coluna '${nomeCol}' não encontrada no contexto da consulta."
+    }
+}
+
+// Correspondência de padrão SQL LIKE / LinConEs COMO (% = qualquer sequência, _ = 1 caractere).
+funcao combinarComo(textoAlvo: texto, mascara: texto): logico {
+    var t: texto = textoAlvo.minusculo()
+    var p: texto = mascara.minusculo()
+    var n: inteiro = t.tamanho()
+    var m: inteiro = p.tamanho()
+    var ti: inteiro = 0
+    var pi: inteiro = 0
+    var estrelaIdx: inteiro = -1
+    var matchIdx: inteiro = 0
+
+    enquanto (ti < n) {
+        se (pi < m e (p[pi] == "_" ou p[pi] == t[ti])) {
+            ti = ti + 1
+            pi = pi + 1
+        } senao se (pi < m e p[pi] == "%") {
+            estrelaIdx = pi
+            matchIdx = ti
+            pi = pi + 1
+        } senao se (estrelaIdx >= 0) {
+            pi = estrelaIdx + 1
+            matchIdx = matchIdx + 1
+            ti = matchIdx
+        } senao {
+            retorna falso
+        }
+    }
+    enquanto (pi < m e p[pi] == "%") {
+        pi = pi + 1
+    }
+    retorna pi == m
+}
+
+funcao valorParaTriLogico(v: Val.Valor): Val.TriLogico {
+    se (v.ehNulo()) { retorna Val.TriLogico.Desconhecido }
+    se (v.tipoDado == Val.TipoDado.Logico) {
+        retorna v.logicoVal ? Val.TriLogico.Verdadeiro : Val.TriLogico.Falso
+    }
+    se (v.tipoDado == Val.TipoDado.Inteiro) {
+        retorna v.inteiroVal != 0 ? Val.TriLogico.Verdadeiro : Val.TriLogico.Falso
+    }
+    retorna Val.TriLogico.Verdadeiro
+}
+
+funcao triLogicoParaValor(t: Val.TriLogico): Val.Valor {
+    se (t == Val.TriLogico.Desconhecido) { retorna Val.Valor.nuloVal() }
+    retorna Val.Valor.deLogico(t == Val.TriLogico.Verdadeiro)
+}
+
+funcao avaliarCondicao(expr: Ast.Expressao, ctx: ContextoLinha): logico {
+    var v: Val.Valor = avaliarExpressao(expr, ctx)
+    retorna valorParaTriLogico(v) == Val.TriLogico.Verdadeiro
+}
+
+funcao avaliarExpressao(expr: Ast.Expressao, ctx: ContextoLinha): Val.Valor {
+    escolha (expr.tipoExpr) {
+        caso Ast.TipoExpressao.Literal:
+            retorna expr.valorLiteral
+
+        caso Ast.TipoExpressao.Coluna:
+            retorna ctx.buscarColuna(expr.tabelaRef, expr.nome)
+
+        caso Ast.TipoExpressao.Parametro:
+            se (expr.nome != "" e ctx.parametrosNomeados.contem(expr.nome)) {
+                retorna ctx.parametrosNomeados[expr.nome]
+            }
+            var idxP: inteiro = expr.indiceParametro - 1
+            se (idxP >= 0 e idxP < ctx.parametrosPosicionais.tamanho()) {
+                retorna ctx.parametrosPosicionais[idxP]
+            }
+            falhar "Parâmetro '${expr.nome != "" ? expr.nome : texto(expr.indiceParametro)}' não vinculado."
+
+        caso Ast.TipoExpressao.Unaria:
+            var vOp: Val.Valor = avaliarExpressao(expr.esquerda, ctx)
+            se (expr.operador == "NAO") {
+                retorna triLogicoParaValor(Val.triNao(valorParaTriLogico(vOp)))
+            }
+            se (expr.operador == "-") {
+                se (vOp.ehNulo()) { retorna Val.Valor.nuloVal() }
+                se (vOp.tipoDado == Val.TipoDado.Inteiro) { retorna Val.Valor.deInteiro(-vOp.inteiroVal) }
+                se (vOp.tipoDado == Val.TipoDado.Decimal) { retorna Val.Valor.deDecimal(-vOp.inteiroVal, vOp.escala) }
+                retorna Val.Valor.deReal(-vOp.comoReal())
+            }
+            retorna vOp
+
+        caso Ast.TipoExpressao.EhNulo:
+            var vAlvo: Val.Valor = avaliarExpressao(expr.esquerda, ctx)
+            var resNulo: logico = vAlvo.ehNulo()
+            retorna Val.Valor.deLogico(expr.negado ? !resNulo : resNulo)
+
+        caso Ast.TipoExpressao.Entre:
+            var vE: Val.Valor = avaliarExpressao(expr.esquerda, ctx)
+            var vIni: Val.Valor = avaliarExpressao(expr.direita, ctx)
+            var vFim: Val.Valor = avaliarExpressao(expr.terceiro, ctx)
+            var t1: Val.TriLogico = Val.compararMaiorIgual(vE, vIni)
+            var t2: Val.TriLogico = Val.compararMenorIgual(vE, vFim)
+            var resEntre: Val.TriLogico = Val.triE(t1, t2)
+            se (expr.negado) { resEntre = Val.triNao(resEntre) }
+            retorna triLogicoParaValor(resEntre)
+
+        caso Ast.TipoExpressao.EmLista:
+            var vL: Val.Valor = avaliarExpressao(expr.esquerda, ctx)
+            se (vL.ehNulo()) { retorna Val.Valor.nuloVal() }
+            var achou: logico = falso
+            var temNuloLista: logico = falso
+            para (var i: inteiro = 0; i < expr.argumentos.tamanho(); i = i + 1) {
+                var itemV: Val.Valor = avaliarExpressao(expr.argumentos[i], ctx)
+                se (itemV.ehNulo()) {
+                    temNuloLista = verdadeiro
+                } senao se (Val.compararTotal(vL, itemV) == 0) {
+                    achou = verdadeiro
+                    sustar
+                }
+            }
+            se (achou) {
+                retorna Val.Valor.deLogico(!expr.negado)
+            }
+            se (temNuloLista) {
+                retorna Val.Valor.nuloVal()
+            }
+            retorna Val.Valor.deLogico(expr.negado)
+
+        caso Ast.TipoExpressao.Binaria:
+            se (expr.operador == "E") {
+                var tEsq: Val.TriLogico = valorParaTriLogico(avaliarExpressao(expr.esquerda, ctx))
+                se (tEsq == Val.TriLogico.Falso) { retorna Val.Valor.deLogico(falso) }
+                var tDir: Val.TriLogico = valorParaTriLogico(avaliarExpressao(expr.direita, ctx))
+                retorna triLogicoParaValor(Val.triE(tEsq, tDir))
+            }
+            se (expr.operador == "OU") {
+                var tEsqO: Val.TriLogico = valorParaTriLogico(avaliarExpressao(expr.esquerda, ctx))
+                se (tEsqO == Val.TriLogico.Verdadeiro) { retorna Val.Valor.deLogico(verdadeiro) }
+                var tDirO: Val.TriLogico = valorParaTriLogico(avaliarExpressao(expr.direita, ctx))
+                retorna triLogicoParaValor(Val.triOu(tEsqO, tDirO))
+            }
+            var a: Val.Valor = avaliarExpressao(expr.esquerda, ctx)
+            var b: Val.Valor = avaliarExpressao(expr.direita, ctx)
+            escolha (expr.operador) {
+                caso "=": retorna triLogicoParaValor(Val.compararIgual(a, b))
+                caso "!=": retorna triLogicoParaValor(Val.compararDiferente(a, b))
+                caso "<": retorna triLogicoParaValor(Val.compararMenor(a, b))
+                caso "<=": retorna triLogicoParaValor(Val.compararMenorIgual(a, b))
+                caso ">": retorna triLogicoParaValor(Val.compararMaior(a, b))
+                caso ">=": retorna triLogicoParaValor(Val.compararMaiorIgual(a, b))
+                caso "COMO":
+                    se (a.ehNulo() ou b.ehNulo()) { retorna Val.Valor.nuloVal() }
+                    retorna Val.Valor.deLogico(combinarComo(a.paraTexto(), b.paraTexto()))
+                caso "+":
+                    se (a.ehNulo() ou b.ehNulo()) { retorna Val.Valor.nuloVal() }
+                    se (a.tipoDado == Val.TipoDado.Inteiro e b.tipoDado == Val.TipoDado.Inteiro) {
+                        retorna Val.Valor.deInteiro(a.inteiroVal + b.inteiroVal)
+                    }
+                    se (a.tipoDado == Val.TipoDado.Decimal e b.tipoDado == Val.TipoDado.Decimal e a.escala == b.escala) {
+                        retorna Val.Valor.deDecimal(a.inteiroVal + b.inteiroVal, a.escala)
+                    }
+                    retorna Val.Valor.deReal(a.comoReal() + b.comoReal())
+                caso "-":
+                    se (a.ehNulo() ou b.ehNulo()) { retorna Val.Valor.nuloVal() }
+                    se (a.tipoDado == Val.TipoDado.Inteiro e b.tipoDado == Val.TipoDado.Inteiro) {
+                        retorna Val.Valor.deInteiro(a.inteiroVal - b.inteiroVal)
+                    }
+                    se (a.tipoDado == Val.TipoDado.Decimal e b.tipoDado == Val.TipoDado.Decimal e a.escala == b.escala) {
+                        retorna Val.Valor.deDecimal(a.inteiroVal - b.inteiroVal, a.escala)
+                    }
+                    retorna Val.Valor.deReal(a.comoReal() - b.comoReal())
+                caso "*":
+                    se (a.ehNulo() ou b.ehNulo()) { retorna Val.Valor.nuloVal() }
+                    se (a.tipoDado == Val.TipoDado.Inteiro e b.tipoDado == Val.TipoDado.Inteiro) {
+                        retorna Val.Valor.deInteiro(a.inteiroVal * b.inteiroVal)
+                    }
+                    retorna Val.Valor.deReal(a.comoReal() * b.comoReal())
+                caso "/":
+                    se (a.ehNulo() ou b.ehNulo()) { retorna Val.Valor.nuloVal() }
+                    var divR: real = b.comoReal()
+                    se (divR == 0.0) { falhar "Erro aritmético: divisão por zero." }
+                    retorna Val.Valor.deReal(a.comoReal() / divR)
+                caso "%":
+                    se (a.ehNulo() ou b.ehNulo()) { retorna Val.Valor.nuloVal() }
+                    se (b.inteiroVal == 0) { falhar "Erro aritmético: módulo por zero." }
+                    retorna Val.Valor.deInteiro(a.inteiroVal % b.inteiroVal)
+            }
+
+        caso Ast.TipoExpressao.Chamada:
+            retorna avaliarFuncaoEscalar(expr.nome, expr.argumentos, ctx)
+    }
+    retorna Val.Valor.nuloVal()
+}
+
+funcao avaliarFuncaoEscalar(nome: texto, args: Ast.Expressao[], ctx: ContextoLinha): Val.Valor {
+    var vals: Val.Valor[] = []
+    para (var i: inteiro = 0; i < args.tamanho(); i = i + 1) {
+        vals.adicionar(avaliarExpressao(args[i], ctx))
+    }
+    escolha (nome) {
+        caso "MAIUSCULO":
+            se (vals.tamanho() < 1 ou vals[0].ehNulo()) { retorna Val.Valor.nuloVal() }
+            retorna Val.Valor.deTexto(vals[0].paraTexto().maiusculo())
+        caso "MINUSCULO":
+            se (vals.tamanho() < 1 ou vals[0].ehNulo()) { retorna Val.Valor.nuloVal() }
+            retorna Val.Valor.deTexto(vals[0].paraTexto().minusculo())
+        caso "TAMANHO":
+            se (vals.tamanho() < 1 ou vals[0].ehNulo()) { retorna Val.Valor.nuloVal() }
+            retorna Val.Valor.deInteiro(vals[0].paraTexto().tamanho())
+        caso "ABSOLUTO":
+            se (vals.tamanho() < 1 ou vals[0].ehNulo()) { retorna Val.Valor.nuloVal() }
+            se (vals[0].tipoDado == Val.TipoDado.Inteiro) {
+                var vA: inteiro = vals[0].inteiroVal
+                retorna Val.Valor.deInteiro(vA < 0 ? -vA : vA)
+            }
+            var rA: real = vals[0].comoReal()
+            retorna Val.Valor.deReal(rA < 0.0 ? -rA : rA)
+        caso "COALESCER":
+            para (var c: inteiro = 0; c < vals.tamanho(); c = c + 1) {
+                se (!vals[c].ehNulo()) { retorna vals[c] }
+            }
+            retorna Val.Valor.nuloVal()
+        caso "SE_NULO":
+            se (vals.tamanho() >= 2) {
+                retorna vals[0].ehNulo() ? vals[1] : vals[0]
+            }
+            retorna Val.Valor.nuloVal()
+        caso "CONCATENAR":
+            var acc: texto = ""
+            para (var k: inteiro = 0; k < vals.tamanho(); k = k + 1) {
+                se (vals[k].ehNulo()) { retorna Val.Valor.nuloVal() }
+                acc = acc + vals[k].paraTexto()
+            }
+            retorna Val.Valor.deTexto(acc)
+    }
+    falhar "Função escalar desconhecida: '${nome}'."
+}

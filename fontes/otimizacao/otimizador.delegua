@@ -1,0 +1,222 @@
+modulo otimizacao.otimizador
+
+importar ast.nos como Ast
+importar catalogo.esquema como Cat
+importar tipos.valor como Val
+importar expressoes.avaliador como Eval
+
+enum EstrategiaAcesso {
+    VarreduraSequencial,
+    BuscaIndiceExata,
+    VarreduraIndiceIntervalo
+}
+
+// Plano físico escolhido pelo planejador/otimizador baseado em custo e índices disponíveis.
+classe PlanoConsulta {
+    estrategia: EstrategiaAcesso
+    tabela: texto
+    nomeIndice: texto
+    paginaRaizIndice: inteiro
+    chaveExata: qualquer
+    chaveMin: qualquer
+    incluirMin: logico
+    chaveMax: qualquer
+    incluirMax: logico
+    custoEstimado: real
+    linhasEstimadas: inteiro
+    otimizacoesAplicadas: texto[]
+    condicaoOtimizada: qualquer
+
+    construtor(tabela: texto) {
+        isto.estrategia = EstrategiaAcesso.VarreduraSequencial
+        isto.tabela = tabela
+        isto.nomeIndice = ""
+        isto.paginaRaizIndice = 0
+        isto.chaveExata = nulo
+        isto.chaveMin = nulo
+        isto.incluirMin = verdadeiro
+        isto.chaveMax = nulo
+        isto.incluirMax = verdadeiro
+        isto.custoEstimado = 1.0
+        isto.linhasEstimadas = 0
+        isto.otimizacoesAplicadas = []
+        isto.condicaoOtimizada = nulo
+    }
+
+    descrever(): texto {
+        var nomeEst: texto = "VarreduraSequencial"
+        se (isto.estrategia == EstrategiaAcesso.BuscaIndiceExata) {
+            nomeEst = "BuscaIndiceExata(${isto.nomeIndice})"
+        } senao se (isto.estrategia == EstrategiaAcesso.VarreduraIndiceIntervalo) {
+            nomeEst = "VarreduraIndiceIntervalo(${isto.nomeIndice})"
+        }
+        var opts: texto = ""
+        para (var i: inteiro = 0; i < isto.otimizacoesAplicadas.tamanho(); i = i + 1) {
+            se (i > 0) { opts = opts + ", " }
+            opts = opts + isto.otimizacoesAplicadas[i]
+        }
+        se (opts == "") { opts = "nenhuma" }
+        retorna "Plano[tabela=${isto.tabela}, acesso=${nomeEst}, linhasEst=${isto.linhasEstimadas}, custoEst=${isto.custoEstimado}, otimizacoes=[${opts}]]"
+    }
+}
+
+// Otimizador com controles independentes de ablação (para validação diferencial com/sem otimizações).
+classe Otimizador {
+    habilitarDobramentoConstantes: logico
+    habilitarSelecaoIndice: logico
+    dobramentosAplicados: inteiro
+    indicesSelecionados: inteiro
+
+    construtor(habilitarDobramentoConstantes: logico = verdadeiro, habilitarSelecaoIndice: logico = verdadeiro) {
+        isto.habilitarDobramentoConstantes = habilitarDobramentoConstantes
+        isto.habilitarSelecaoIndice = habilitarSelecaoIndice
+        isto.dobramentosAplicados = 0
+        isto.indicesSelecionados = 0
+    }
+
+    // Passe 1: Dobramento de constantes e simplificação booleana respeitando lógica ternária.
+    dobrarExpressao(expr: Ast.Expressao, notas: texto[]): Ast.Expressao {
+        se (!isto.habilitarDobramentoConstantes) {
+            retorna expr
+        }
+        escolha (expr.tipoExpr) {
+            caso Ast.TipoExpressao.Unaria:
+                var opD: Ast.Expressao = isto.dobrarExpressao(expr.esquerda, notas)
+                se (opD.tipoExpr == Ast.TipoExpressao.Literal) {
+                    var ctxVazio = Eval.ContextoLinha([], [], [])
+                    var novoV: Val.Valor = Eval.avaliarExpressao(Ast.Expressao.unaria(expr.operador, opD, expr.intervalo), ctxVazio)
+                    isto.dobramentosAplicados = isto.dobramentosAplicados + 1
+                    notas.adicionar("dobramento_unario")
+                    retorna Ast.Expressao.literal(novoV, expr.intervalo)
+                }
+                retorna Ast.Expressao.unaria(expr.operador, opD, expr.intervalo)
+
+            caso Ast.TipoExpressao.Binaria:
+                var esqD: Ast.Expressao = isto.dobrarExpressao(expr.esquerda, notas)
+                var dirD: Ast.Expressao = isto.dobrarExpressao(expr.direita, notas)
+                se (esqD.tipoExpr == Ast.TipoExpressao.Literal e dirD.tipoExpr == Ast.TipoExpressao.Literal) {
+                    // Protege contra dobramento de divisão por zero (erro deve ocorrer em tempo de execução se atingido)
+                    se ((expr.operador == "/" ou expr.operador == "%") e dirD.valorLiteral.comoReal() == 0.0) {
+                        retorna Ast.Expressao.binaria(expr.operador, esqD, dirD, expr.intervalo)
+                    }
+                    var ctxV = Eval.ContextoLinha([], [], [])
+                    var valDob: Val.Valor = Eval.avaliarExpressao(Ast.Expressao.binaria(expr.operador, esqD, dirD, expr.intervalo), ctxV)
+                    isto.dobramentosAplicados = isto.dobramentosAplicados + 1
+                    notas.adicionar("dobramento_binario")
+                    retorna Ast.Expressao.literal(valDob, expr.intervalo)
+                }
+                // Simplificações booleanas seguras sob lógica ternária
+                se (expr.operador == "E" e esqD.tipoExpr == Ast.TipoExpressao.Literal e esqD.valorLiteral.tipoDado == Val.TipoDado.Logico) {
+                    se (esqD.valorLiteral.logicoVal) {
+                        notas.adicionar("simplificacao_E_verdadeiro")
+                        retorna dirD
+                    } senao {
+                        notas.adicionar("simplificacao_E_falso")
+                        retorna esqD
+                    }
+                }
+                se (expr.operador == "OU" e esqD.tipoExpr == Ast.TipoExpressao.Literal e esqD.valorLiteral.tipoDado == Val.TipoDado.Logico) {
+                    se (esqD.valorLiteral.logicoVal) {
+                        notas.adicionar("simplificacao_OU_verdadeiro")
+                        retorna esqD
+                    } senao {
+                        notas.adicionar("simplificacao_OU_falso")
+                        retorna dirD
+                    }
+                }
+                retorna Ast.Expressao.binaria(expr.operador, esqD, dirD, expr.intervalo)
+        }
+        retorna expr
+    }
+
+    // Passe 2: Planejamento de acesso físico com modelo de custo baseado em cardinalidade estimada e índices B+ Tree.
+    planejarSelecao(cmd: Ast.Comando, tab: Cat.DefinicaoTabela): PlanoConsulta {
+        var plano = PlanoConsulta(tab.nome)
+        var estLinhas: inteiro = tab.estimativaLinhas > 0 ? tab.estimativaLinhas : 10
+        plano.linhasEstimadas = estLinhas
+        plano.custoEstimado = real(estLinhas) * 1.0
+
+        se (cmd.condicaoOnde == nulo) {
+            retorna plano
+        }
+
+        var condOpt: Ast.Expressao = isto.dobrarExpressao(cmd.condicaoOnde, plano.otimizacoesAplicadas)
+        plano.condicaoOtimizada = condOpt
+
+        se (!isto.habilitarSelecaoIndice ou cmd.juncoes.tamanho() > 0) {
+            retorna plano
+        }
+
+        // Identifica predicado indexável de igualdade ou intervalo (col = lit, col > lit, col >= lit, col < lit, col <= lit, col ENTRE a E b)
+        isto.tentarSelecionarIndice(condOpt, tab, plano, estLinhas)
+        retorna plano
+    }
+
+    tentarSelecionarIndice(cond: Ast.Expressao, tab: Cat.DefinicaoTabela, plano: PlanoConsulta, estLinhas: inteiro): vazio {
+        se (cond.tipoExpr == Ast.TipoExpressao.Binaria e cond.operador == "E") {
+            isto.tentarSelecionarIndice(cond.esquerda, tab, plano, estLinhas)
+            se (plano.estrategia == EstrategiaAcesso.VarreduraSequencial) {
+                isto.tentarSelecionarIndice(cond.direita, tab, plano, estLinhas)
+            }
+            retorna
+        }
+        se (cond.tipoExpr == Ast.TipoExpressao.Binaria) {
+            var esq: Ast.Expressao = cond.esquerda
+            var dir: Ast.Expressao = cond.direita
+            se (esq.tipoExpr == Ast.TipoExpressao.Coluna e dir.tipoExpr == Ast.TipoExpressao.Literal e !dir.valorLiteral.ehNulo()) {
+                var ind: qualquer = tab.obterIndicePorColuna(esq.nome)
+                se (ind != nulo) {
+                    se (cond.operador == "=") {
+                        plano.estrategia = EstrategiaAcesso.BuscaIndiceExata
+                        plano.nomeIndice = ind.nome
+                        plano.paginaRaizIndice = ind.paginaRaiz
+                        plano.chaveExata = dir.valorLiteral
+                        plano.linhasEstimadas = ind.unico ? 1 : (estLinhas \ 10 + 1)
+                        plano.custoEstimado = 3.0
+                        plano.otimizacoesAplicadas.adicionar("indice_exato:" + ind.nome)
+                        isto.indicesSelecionados = isto.indicesSelecionados + 1
+                        retorna
+                    }
+                    se (cond.operador == ">" ou cond.operador == ">=" ou cond.operador == "<" ou cond.operador == "<=") {
+                        plano.estrategia = EstrategiaAcesso.VarreduraIndiceIntervalo
+                        plano.nomeIndice = ind.nome
+                        plano.paginaRaizIndice = ind.paginaRaiz
+                        se (cond.operador == ">" ou cond.operador == ">=") {
+                            plano.chaveMin = dir.valorLiteral
+                            plano.incluirMin = (cond.operador == ">=")
+                        } senao {
+                            plano.chaveMax = dir.valorLiteral
+                            plano.incluirMax = (cond.operador == "<=")
+                        }
+                        plano.linhasEstimadas = estLinhas \ 3 + 1
+                        plano.custoEstimado = 3.0 + real(plano.linhasEstimadas) * 0.5
+                        plano.otimizacoesAplicadas.adicionar("indice_intervalo:" + ind.nome)
+                        isto.indicesSelecionados = isto.indicesSelecionados + 1
+                        retorna
+                    }
+                }
+            }
+        }
+        se (cond.tipoExpr == Ast.TipoExpressao.Entre e !cond.negado) {
+            var alvo: Ast.Expressao = cond.esquerda
+            var ini: Ast.Expressao = cond.direita
+            var fimE: Ast.Expressao = cond.terceiro
+            se (alvo.tipoExpr == Ast.TipoExpressao.Coluna e ini.tipoExpr == Ast.TipoExpressao.Literal e fimE.tipoExpr == Ast.TipoExpressao.Literal) {
+                var indE: qualquer = tab.obterIndicePorColuna(alvo.nome)
+                se (indE != nulo) {
+                    plano.estrategia = EstrategiaAcesso.VarreduraIndiceIntervalo
+                    plano.nomeIndice = indE.nome
+                    plano.paginaRaizIndice = indE.paginaRaiz
+                    plano.chaveMin = ini.valorLiteral
+                    plano.incluirMin = verdadeiro
+                    plano.chaveMax = fimE.valorLiteral
+                    plano.incluirMax = verdadeiro
+                    plano.linhasEstimadas = estLinhas \ 4 + 1
+                    plano.custoEstimado = 3.0 + real(plano.linhasEstimadas) * 0.5
+                    plano.otimizacoesAplicadas.adicionar("indice_entre:" + indE.nome)
+                    isto.indicesSelecionados = isto.indicesSelecionados + 1
+                }
+            }
+        }
+    }
+}

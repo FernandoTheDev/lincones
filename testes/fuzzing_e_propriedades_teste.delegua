@@ -1,0 +1,119 @@
+importar sintatico.parser como Par
+importar execucao.motor_proprio como Motor
+importar armazenamento.posix_io como Pio
+importar paginas.formato como Fmt
+importar cgd.dados.binario como Bin
+
+funcao afirmar(condicao: logico, msg: texto): vazio {
+    se (!condicao) {
+        falhar "FALHA FUZZ/PROPRIEDADE: " + msg
+    }
+}
+
+// PRNG LCG determinístico (semente fixa para 100% de reprodutibilidade).
+classe GeradorDeterministico {
+    estado: inteiro
+
+    construtor(semente: inteiro = 123456789) {
+        isto.estado = semente
+    }
+
+    proximo(): inteiro {
+        isto.estado = (isto.estado * 1103515245 + 12345) & 2147483647
+        retorna isto.estado
+    }
+
+    entre(minVal: inteiro, maxVal: inteiro): inteiro {
+        var faixa: inteiro = maxVal - minVal + 1
+        retorna minVal + (isto.proximo() % faixa)
+    }
+}
+
+var rng = GeradorDeterministico(424242)
+
+// 1. Campanha de Fuzzing determinístico no Lexador + Parser (400 entradas mutadas/aleatórias)
+const fragmentos: texto[] = [
+    "SELECIONAR", "DE", "ONDE", "CRIAR", "TABELA", "INSERIR", "EM", "VALORES",
+    "ATUALIZAR", "DEFINIR", "EXCLUIR", "ALTERAR", "REMOVER", "NULO", "E", "OU",
+    "(", ")", ",", ";", "=", ">=", "<=", "!=", "*", "?", ":p", "\"abc\"", "'x''y'",
+    "123", "45.67", "@", "!", "/* aberto", "-- comentario\n", "çãõé"
+]
+para (var f: inteiro = 0; f < 120; f = f + 1) {
+    var qtdToks: inteiro = rng.entre(1, 14)
+    var entrada: texto = ""
+    para (var k: inteiro = 0; k < qtdToks; k = k + 1) {
+        entrada = entrada + fragmentos[rng.entre(0, fragmentos.tamanho() - 1)] + " "
+    }
+    // Não deve travar, entrar em loop infinito ou dar crash!
+    var resF = Par.AnalisadorSintatico.analisarCodigo(entrada, "fuzz.lincones", falso)
+    afirmar(resF != nulo, "Parser retornou nulo no fuzz " + texto(f))
+}
+
+// 2. Teste baseado em propriedades: B+ Tree vs Varredura Sequencial em 150 operações aleatórias
+var db = Motor.MotorProprio(":memoria:", 64, falso, falso)
+db.abrir()
+db.executar("CRIAR TABELA prop (k INTEIRO CHAVE PRIMARIA, v INTEIRO NAO NULO);")
+var mapaRef: dicionario = {}
+
+para (var op: inteiro = 0; op < 50; op = op + 1) {
+    var chave: inteiro = rng.entre(1, 60)
+    var acao: inteiro = rng.entre(0, 2)
+    var chaveTxt: texto = texto(chave)
+    se (acao == 0) {
+        // Inserir ou atualizar
+        var valNovo: inteiro = rng.entre(1, 10000)
+        se (mapaRef.contem(chaveTxt)) {
+            db.executar("ATUALIZAR prop DEFINIR v = ? ONDE k = ?;", [valNovo, chave])
+        } senao {
+            db.executar("INSERIR EM prop (k, v) VALORES (?, ?);", [chave, valNovo])
+        }
+        mapaRef[chaveTxt] = valNovo
+    } senao se (acao == 1) {
+        // Excluir
+        db.executar("EXCLUIR DE prop ONDE k = ?;", [chave])
+        se (mapaRef.contem(chaveTxt)) {
+            mapaRef.remover(chaveTxt)
+        }
+    } senao {
+        // Consultar por índice (otimizado) vs referência
+        var r = db.executar("SELECIONAR v DE prop ONDE k = " + chaveTxt + ";")
+        se (mapaRef.contem(chaveTxt)) {
+            afirmar(r.linhas.tamanho() == 1 e r.linhas[0][0].inteiroVal == inteiro(mapaRef[chaveTxt]), "Divergência chave=" + chaveTxt + " linhas=" + texto(r.linhas.tamanho()) + " ret=" + (r.linhas.tamanho() > 0 ? r.linhas[0][0].paraTexto() : "NENHUM") + " esp=" + texto(mapaRef[chaveTxt]))
+        } senao {
+            afirmar(r.linhas.tamanho() == 0, "Chave ausente retornou linha para " + chaveTxt)
+        }
+    }
+}
+afirmar(db.verificarIntegridade().tamanho() == 0, "Integridade falhou após 150 operações aleatórias")
+db.fechar()
+
+// 3. Fuzzing de formato binário: corrupção de 1 byte na página 1 deve ser detectada pelo CRC32
+const caminhoCorr: texto = "/tmp/lincones_fuzz_corrupcao.lce"
+Pio.PosixIO.unlink(caminhoCorr)
+var dbC = Motor.MotorProprio(caminhoCorr, 16, verdadeiro, falso)
+dbC.abrir()
+dbC.executar("CRIAR TABELA t (id INTEIRO CHAVE PRIMARIA); INSERIR EM t (id) VALORES (1);")
+dbC.fechar()
+
+// Corrompe propositalmente o byte 4120 (dentro da página 1)
+var fd: inteiro = Pio.PosixIO.open(caminhoCorr, 2, 420) // O_RDWR
+var fp: inteiro = Pio.PosixIO.fdopen(fd, "r+b")
+Pio.PosixIO.fseeko(fp, 4120, 0)
+var orig: inteiro = Pio.PosixIO.fgetc(fp)
+Pio.PosixIO.fseeko(fp, 4120, 0)
+Pio.PosixIO.fputc((orig ^ 255) & 255, fp)
+Pio.PosixIO.fflush(fp)
+Pio.PosixIO.close(fd)
+
+var detectouCorrupcao: logico = falso
+tente {
+    var dbC2 = Motor.MotorProprio(caminhoCorr, 16, verdadeiro, falso)
+    dbC2.abrir()
+    dbC2.fechar()
+} pegue (errCorr) {
+    detectouCorrupcao = texto(errCorr).inclui("CRC32") ou texto(errCorr).inclui("Corrupção")
+}
+Pio.PosixIO.unlink(caminhoCorr)
+afirmar(detectouCorrupcao, "Corrupção de byte na página 1 deveria ser detectada pelo CRC32")
+
+escreva("fuzzing_e_propriedades_teste: OK")

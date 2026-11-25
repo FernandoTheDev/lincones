@@ -1,0 +1,17 @@
+-- Exemplo completo em LinConEs Nativo
+CRIAR TABELA SE NÃO EXISTIR livros (
+    id INTEIRO NAO NULO CHAVE PRIMARIA AUTO INCREMENTO,
+    titulo TEXTO(120) NAO NULO,
+    autor TEXTO(80) NAO NULO,
+    paginas INTEIRO NAO NULO
+);
+
+INSERIR EM livros (titulo, autor, paginas) VALORES
+    ("Dom Casmurro", "Machado de Assis", 256),
+    ("Grande Sertão: Veredas", "Guimarães Rosa", 608),
+    ("Memórias Póstumas de Brás Cubas", "Machado de Assis", 320);
+
+SELECIONAR autor, CONTAR(*) COMO qtd_livros, MEDIA(paginas) COMO media_paginas
+DE livros
+AGRUPAR POR autor
+ORDENAR POR qtd_livros DECRESCENTE;

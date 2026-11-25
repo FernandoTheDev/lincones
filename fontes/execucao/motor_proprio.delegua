@@ -1,0 +1,1071 @@
+modulo execucao.motor_proprio
+
+importar cgd.sistema.memoria como Mem
+importar cgd.sistema.tempo como Tmp
+importar armazenamento.posix_io como Pio
+importar armazenamento.registros como Reg
+importar paginas.formato como Fmt
+importar paginas.gerenciador_paginas como Pag
+importar indices.arvore_bmais como BTree
+importar catalogo.esquema como Cat
+importar catalogo.persistencia_catalogo como PersCat
+importar transacoes.wal como Wal
+importar concorrencia.controle_locks como Locks
+importar ast.nos como Ast
+importar sintatico.parser como Par
+importar semantico.analisador como Sem
+importar diagnosticos.diagnostico como Diag
+importar tipos.valor como Val
+importar expressoes.avaliador como Eval
+importar otimizacao.otimizador como Opt
+
+classe ResultadoProprio {
+    colunas: texto[]
+    linhas: qualquer[] // Val.Valor[][]
+    linhasAfetadas: inteiro
+    ultimoId: inteiro
+    planoTexto: texto
+    tempoMs: real
+    mensagem: texto
+
+    construtor() {
+        isto.colunas = []
+        isto.linhas = []
+        isto.linhasAfetadas = 0
+        isto.ultimoId = 0
+        isto.planoTexto = ""
+        isto.tempoMs = 0.0
+        isto.mensagem = ""
+    }
+}
+
+funcao ehFuncaoAgregadora(nome: texto): logico {
+    var n: texto = nome.maiusculo()
+    retorna n == "CONTAR" ou n == "SOMA" ou n == "MEDIA" ou n == "MÉDIA" ou n == "MINIMO" ou n == "MÍNIMO" ou n == "MAXIMO" ou n == "MÁXIMO"
+}
+
+funcao expressaoContemAgregacao(expr: Ast.Expressao): logico {
+    se (expr.tipoExpr == Ast.TipoExpressao.Chamada e ehFuncaoAgregadora(expr.nome)) {
+        retorna verdadeiro
+    }
+    se (expr.esquerda != nulo e expressaoContemAgregacao(expr.esquerda)) { retorna verdadeiro }
+    se (expr.direita != nulo e expressaoContemAgregacao(expr.direita)) { retorna verdadeiro }
+    para (var i: inteiro = 0; i < expr.argumentos.tamanho(); i = i + 1) {
+        se (expressaoContemAgregacao(expr.argumentos[i])) { retorna verdadeiro }
+    }
+    retorna falso
+}
+
+funcao converterParaValor(v: qualquer): Val.Valor {
+    se (v == nulo) { retorna Val.Valor.nuloVal() }
+    se (v == verdadeiro) { retorna Val.Valor.deLogico(verdadeiro) }
+    se (v == falso) { retorna Val.Valor.deLogico(falso) }
+    var td: texto = tipo de v
+    se (td == "inteiro") { retorna Val.Valor.deInteiro(inteiro(v)) }
+    se (td == "real" ou td == "número" ou td == "numero") {
+        var rVal: real = real(v)
+        var iVal: inteiro = inteiro(rVal)
+        se (real(iVal) == rVal) {
+            retorna Val.Valor.deInteiro(iVal)
+        }
+        retorna Val.Valor.deReal(rVal)
+    }
+    se (td == "texto") { retorna Val.Valor.deTexto(texto(v)) }
+    retorna v
+}
+
+// Ordenação estável (MergeSort) sobre pares [chaveOrdenacao: Val.Valor[], payload: qualquer]
+funcao compararChavesOrdem(a: Val.Valor[], b: Val.Valor[], descendentes: logico[]): inteiro {
+    para (var i: inteiro = 0; i < a.tamanho(); i = i + 1) {
+        var cmp: inteiro = Val.compararTotal(a[i], b[i])
+        se (cmp != 0) {
+            retorna descendentes[i] ? -cmp : cmp
+        }
+    }
+    retorna 0
+}
+
+funcao ordenarIndicesMerge(
+    indices: inteiro[],
+    chaves: qualquer[],
+    descendentes: logico[]
+): inteiro[] {
+    var n: inteiro = indices.tamanho()
+    se (n <= 1) { retorna indices }
+    var meio: inteiro = n \ 2
+    var esq: inteiro[] = []
+    var dir: inteiro[] = []
+    para (var i: inteiro = 0; i < n; i = i + 1) {
+        se (i < meio) { esq.adicionar(indices[i]) } senao { dir.adicionar(indices[i]) }
+    }
+    esq = ordenarIndicesMerge(esq, chaves, descendentes)
+    dir = ordenarIndicesMerge(dir, chaves, descendentes)
+
+    var res: inteiro[] = []
+    var ie: inteiro = 0
+    var id: inteiro = 0
+    enquanto (ie < esq.tamanho() e id < dir.tamanho()) {
+        se (compararChavesOrdem(chaves[esq[ie]], chaves[dir[id]], descendentes) <= 0) {
+            res.adicionar(esq[ie])
+            ie = ie + 1
+        } senao {
+            res.adicionar(dir[id])
+            id = id + 1
+        }
+    }
+    enquanto (ie < esq.tamanho()) { res.adicionar(esq[ie]); ie = ie + 1 }
+    enquanto (id < dir.tamanho()) { res.adicionar(dir[id]); id = id + 1 }
+    retorna res
+}
+
+// SGBD Relacional Embarcado Próprio (100% Delégua, sem SQLite ou SGBD externo).
+classe MotorProprio {
+    caminho: texto
+    pager: Pag.GerenciadorPaginas
+    armazenamento: Reg.ArmazenamentoTabela
+    wal: Wal.GerenciadorWal
+    locks: Locks.ControleLocks
+    catalogo: Cat.Catalogo
+    otimizador: Opt.Otimizador
+    aberto: logico
+    modoEstrito: logico
+
+    // Métricas de observabilidade
+    consultasExecutadas: inteiro
+    linhasProcessadas: inteiro
+    linhasRetornadas: inteiro
+    tempoTotalMs: real
+
+    construtor(
+        caminho: texto = ":memoria:",
+        maxPaginasCache: inteiro = 256,
+        duravel: logico = verdadeiro,
+        modoEstrito: logico = falso
+    ) {
+        isto.caminho = caminho
+        isto.pager = Pag.GerenciadorPaginas(caminho, maxPaginasCache, duravel)
+        isto.armazenamento = Reg.ArmazenamentoTabela(isto.pager)
+        isto.wal = Wal.GerenciadorWal(caminho, duravel)
+        isto.locks = Locks.ControleLocks()
+        isto.catalogo = Cat.Catalogo()
+        isto.otimizador = Opt.Otimizador(verdadeiro, verdadeiro)
+        isto.aberto = falso
+        isto.modoEstrito = modoEstrito
+        isto.consultasExecutadas = 0
+        isto.linhasProcessadas = 0
+        isto.linhasRetornadas = 0
+        isto.tempoTotalMs = 0.0
+    }
+
+    abrir(): vazio {
+        se (isto.aberto) { retorna }
+        isto.pager.abrir()
+        // Recuperação automática idempotente do WAL caso tenha havido encerramento abrupto
+        isto.wal.recuperarDoWal(isto.pager)
+        isto.catalogo = PersCat.carregarCatalogo(isto.pager)
+        isto.aberto = verdadeiro
+    }
+
+    fechar(): vazio {
+        se (!isto.aberto) { retorna }
+        se (isto.wal.emTransacao) {
+            isto.wal.reverterTransacao(isto.pager)
+            isto.catalogo = PersCat.carregarCatalogo(isto.pager)
+        }
+        PersCat.salvarCatalogo(isto.pager, isto.catalogo)
+        isto.pager.fechar()
+        isto.aberto = falso
+    }
+
+    executar(codigo: texto, parametros: qualquer[] = [], parametrosNomeados: dicionario = {}): ResultadoProprio {
+        se (!isto.aberto) {
+            isto.abrir()
+        }
+        var tIni: real = Tmp.Tempo.agoraMs()
+        var parsed = Par.AnalisadorSintatico.analisarCodigo(codigo, "", isto.modoEstrito)
+        se (parsed.diagnosticos.temErros()) {
+            falhar "Erro de análise LinConEs:\n" + parsed.diagnosticos.formatarTodos()
+        }
+
+        // Converte parâmetros para Val.Valor
+        var paramsPos: Val.Valor[] = []
+        para (var pi: inteiro = 0; pi < parametros.tamanho(); pi = pi + 1) {
+            paramsPos.adicionar(converterParaValor(parametros[pi]))
+        }
+        var paramsNom: dicionario = {}
+        var chavesNom: texto[] = parametrosNomeados.chaves()
+        para (var ni: inteiro = 0; ni < chavesNom.tamanho(); ni = ni + 1) {
+            var k: texto = chavesNom[ni]
+            paramsNom[k] = converterParaValor(parametrosNomeados[k])
+        }
+
+        var ultimoRes = ResultadoProprio()
+        para (var i: inteiro = 0; i < parsed.comandos.tamanho(); i = i + 1) {
+            var cmd: Ast.Comando = parsed.comandos[i]
+            var diagSem = Diag.ColetorDiagnosticos()
+            var analSem = Sem.AnalisadorSemantico(isto.catalogo, diagSem)
+            analSem.validarComando(cmd)
+            se (diagSem.temErros()) {
+                falhar "Erro semântico:\n" + diagSem.formatarTodos()
+            }
+            ultimoRes = isto.executarComando(cmd, paramsPos, paramsNom)
+            isto.consultasExecutadas = isto.consultasExecutadas + 1
+        }
+
+        var tFim: real = Tmp.Tempo.agoraMs()
+        ultimoRes.tempoMs = tFim - tIni
+        isto.tempoTotalMs = isto.tempoTotalMs + ultimoRes.tempoMs
+        retorna ultimoRes
+    }
+
+    executarComando(cmd: Ast.Comando, paramsPos: Val.Valor[], paramsNom: dicionario): ResultadoProprio {
+        escolha (cmd.tipoCmd) {
+            caso Ast.TipoComando.CriarTabela: retorna isto.execCriarTabela(cmd)
+            caso Ast.TipoComando.AlterarTabela: retorna isto.execAlterarTabela(cmd)
+            caso Ast.TipoComando.RemoverEntidade: retorna isto.execRemoverTabela(cmd)
+            caso Ast.TipoComando.CriarIndice: retorna isto.execCriarIndice(cmd)
+            caso Ast.TipoComando.RemoverIndice: retorna isto.execRemoverIndice(cmd)
+            caso Ast.TipoComando.Inserir: retorna isto.execInserir(cmd, paramsPos, paramsNom)
+            caso Ast.TipoComando.Selecionar: retorna isto.execSelecionar(cmd, paramsPos, paramsNom)
+            caso Ast.TipoComando.Atualizar: retorna isto.execAtualizar(cmd, paramsPos, paramsNom)
+            caso Ast.TipoComando.Excluir: retorna isto.execExcluir(cmd, paramsPos, paramsNom)
+            caso Ast.TipoComando.Transacao: retorna isto.execTransacao(cmd)
+            caso Ast.TipoComando.Explicar: retorna isto.execExplicar(cmd, paramsPos, paramsNom)
+        }
+        retorna ResultadoProprio()
+    }
+
+    // Auxiliar de autocommit: se não há transação explícita, salva catálogo e envolve a escrita em WAL + checkpoint.
+    confirmarSeAutocommit(): vazio {
+        se (!isto.wal.emTransacao) {
+            PersCat.salvarCatalogo(isto.pager, isto.catalogo)
+            var txId: inteiro = isto.pager.proximoTxId
+            isto.pager.proximoTxId = isto.pager.proximoTxId + 1
+            isto.wal.gravarWalNoDisco(isto.pager, txId, verdadeiro)
+            isto.pager.descarregarTodas()
+            se (!isto.wal.emMemoria) {
+                Pio.PosixIO.unlink(isto.wal.caminhoWal)
+            }
+        }
+    }
+
+    execTransacao(cmd: Ast.Comando): ResultadoProprio {
+        var res = ResultadoProprio()
+        escolha (cmd.tipoTransacao) {
+            caso Ast.TipoTransacao.Iniciar:
+                se (!isto.locks.adquirirEscrita(1)) {
+                    falhar "Conflito de concorrência ao iniciar transação de escrita."
+                }
+                isto.wal.iniciarTransacao(isto.pager)
+                res.mensagem = "Transação iniciada."
+            caso Ast.TipoTransacao.Confirmar:
+                PersCat.salvarCatalogo(isto.pager, isto.catalogo)
+                isto.wal.confirmarTransacao(isto.pager)
+                isto.locks.liberarEscrita(1)
+                res.mensagem = "Transação confirmada."
+            caso Ast.TipoTransacao.Reverter:
+                isto.wal.reverterTransacao(isto.pager)
+                isto.catalogo = PersCat.carregarCatalogo(isto.pager)
+                isto.locks.liberarEscrita(1)
+                res.mensagem = "Transação revertida."
+            caso Ast.TipoTransacao.PontoSalvamento:
+                PersCat.salvarCatalogo(isto.pager, isto.catalogo)
+                isto.wal.criarPontoSalvamento(cmd.nomePonto, isto.pager)
+                res.mensagem = "Ponto de salvamento '${cmd.nomePonto}' criado."
+            caso Ast.TipoTransacao.ReverterPara:
+                isto.wal.reverterParaPonto(cmd.nomePonto, isto.pager)
+                isto.catalogo = PersCat.carregarCatalogo(isto.pager)
+                res.mensagem = "Revertido para ponto de salvamento '${cmd.nomePonto}'."
+            caso Ast.TipoTransacao.LiberarPonto:
+                isto.wal.liberarPonto(cmd.nomePonto)
+                res.mensagem = "Ponto de salvamento '${cmd.nomePonto}' liberado."
+        }
+        retorna res
+    }
+
+    execCriarTabela(cmd: Ast.Comando): ResultadoProprio {
+        var res = ResultadoProprio()
+        se (isto.catalogo.existeTabela(cmd.tabela)) {
+            se (cmd.seNaoExistir) {
+                res.mensagem = "Tabela '${cmd.tabela}' já existe."
+                retorna res
+            }
+            falhar "Tabela '${cmd.tabela}' já existe."
+        }
+        var pagRaiz: inteiro = isto.pager.alocarPagina(Fmt.tipoPaginaDados())
+        var tab = Cat.DefinicaoTabela(cmd.tabela, 0, pagRaiz)
+        para (var i: inteiro = 0; i < cmd.colunasDef.tamanho(); i = i + 1) {
+            var ca: Ast.ColunaAst = cmd.colunasDef[i]
+            var col = Cat.DefinicaoColuna(
+                ca.nome,
+                ca.tipoDado,
+                ca.tamanho,
+                ca.permiteNulo,
+                ca.chavePrimaria,
+                ca.autoIncremento,
+                ca.unica
+            )
+            col.precisao = ca.precisao
+            col.escala = ca.escala
+            col.referenciaTabela = ca.referenciaTabela
+            col.referenciaColuna = ca.referenciaColuna
+            se (ca.valorPadrao != nulo) {
+                col.temPadrao = verdadeiro
+                col.valorPadrao = Eval.avaliarExpressao(ca.valorPadrao, Eval.ContextoLinha([], [], []))
+            }
+            tab.adicionarColuna(col)
+            // Cria índice B+ Tree automático para CHAVE PRIMARIA ou coluna UNICA
+            se (col.chavePrimaria ou col.unica) {
+                var arvore = BTree.ArvoreBMais(isto.pager, 0, verdadeiro)
+                var nomeIdx: texto = (col.chavePrimaria ? "pk_" : "uq_") + cmd.tabela + "_" + col.nome
+                tab.indices.adicionar(Cat.DefinicaoIndice(nomeIdx, cmd.tabela, [col.nome], verdadeiro, arvore.paginaRaiz))
+            }
+        }
+        isto.catalogo.registrarTabela(tab)
+        isto.confirmarSeAutocommit()
+        res.mensagem = "Tabela '${cmd.tabela}' criada com sucesso."
+        retorna res
+    }
+
+    execAlterarTabela(cmd: Ast.Comando): ResultadoProprio {
+        var res = ResultadoProprio()
+        var tab: Cat.DefinicaoTabela = isto.catalogo.obterTabela(cmd.tabela)
+        para (var i: inteiro = 0; i < cmd.operacoesAlteracao.tamanho(); i = i + 1) {
+            var op: Ast.OperacaoAlteracaoAst = cmd.operacoesAlteracao[i]
+            escolha (op.tipoAlteracao) {
+                caso Ast.TipoAlteracao.AdicionarColuna:
+                    var ca: Ast.ColunaAst = op.colunaDef
+                    var novaCol = Cat.DefinicaoColuna(ca.nome, ca.tipoDado, ca.tamanho, ca.permiteNulo, ca.chavePrimaria, ca.autoIncremento, ca.unica)
+                    tab.adicionarColuna(novaCol)
+                    // Preenche registros existentes com NULO na nova coluna
+                    var existentes: Reg.RegistroLido[] = isto.armazenamento.varrerTabela(tab.paginaRaizDados)
+                    para (var r: inteiro = 0; r < existentes.tamanho(); r = r + 1) {
+                        var vals: Val.Valor[] = existentes[r].valores
+                        vals.adicionar(Val.Valor.nuloVal())
+                        isto.armazenamento.atualizarRegistro(tab.paginaRaizDados, existentes[r].rid, vals)
+                    }
+                caso Ast.TipoAlteracao.RenomearColuna:
+                    var idxR: inteiro = tab.indiceColuna(op.nomeColuna)
+                    se (idxR < 0) { falhar "Coluna '${op.nomeColuna}' não encontrada em '${tab.nome}'." }
+                    tab.colunas[idxR].nome = op.novoNomeColuna
+                caso Ast.TipoAlteracao.RemoverColuna:
+                    var idxD: inteiro = tab.indiceColuna(op.nomeColuna)
+                    se (idxD < 0) { falhar "Coluna '${op.nomeColuna}' não encontrada em '${tab.nome}'." }
+                    var novasCols: Cat.DefinicaoColuna[] = []
+                    para (var c: inteiro = 0; c < tab.colunas.tamanho(); c = c + 1) {
+                        se (c != idxD) { novasCols.adicionar(tab.colunas[c]) }
+                    }
+                    tab.colunas = novasCols
+                caso Ast.TipoAlteracao.AdicionarChaveEstrangeira:
+                    var idxF: inteiro = tab.indiceColuna(op.nomeColuna)
+                    se (idxF < 0) { falhar "Coluna '${op.nomeColuna}' não encontrada." }
+                    tab.colunas[idxF].referenciaTabela = op.tabelaRef
+                    tab.colunas[idxF].referenciaColuna = op.colunaRef
+                caso Ast.TipoAlteracao.AdicionarUnica:
+                    var idxU: inteiro = tab.indiceColuna(op.nomeColuna)
+                    se (idxU < 0) { falhar "Coluna '${op.nomeColuna}' não encontrada." }
+                    tab.colunas[idxU].unica = verdadeiro
+                    isto.criarIndiceInterno(tab, op.nomeRestricao, [op.nomeColuna], verdadeiro)
+            }
+        }
+        isto.catalogo.versaoEsquema = isto.catalogo.versaoEsquema + 1
+        isto.confirmarSeAutocommit()
+        res.mensagem = "Tabela '${cmd.tabela}' alterada."
+        retorna res
+    }
+
+    execRemoverTabela(cmd: Ast.Comando): ResultadoProprio {
+        var res = ResultadoProprio()
+        se (!isto.catalogo.existeTabela(cmd.tabela)) {
+            se (cmd.seExistir) {
+                res.mensagem = "Tabela '${cmd.tabela}' não existe."
+                retorna res
+            }
+            falhar "Tabela '${cmd.tabela}' não encontrada."
+        }
+        isto.catalogo.removerTabela(cmd.tabela)
+        isto.confirmarSeAutocommit()
+        res.mensagem = "Tabela '${cmd.tabela}' removida."
+        retorna res
+    }
+
+    criarIndiceInterno(tab: Cat.DefinicaoTabela, nomeIdx: texto, colunas: texto[], unico: logico): vazio {
+        var arvore = BTree.ArvoreBMais(isto.pager, 0, unico)
+        var colIdx: inteiro = tab.indiceColuna(colunas[0])
+        var registros: Reg.RegistroLido[] = isto.armazenamento.varrerTabela(tab.paginaRaizDados)
+        para (var i: inteiro = 0; i < registros.tamanho(); i = i + 1) {
+            arvore.inserir(registros[i].valores[colIdx], registros[i].rid)
+        }
+        tab.indices.adicionar(Cat.DefinicaoIndice(nomeIdx, tab.nome, colunas, unico, arvore.paginaRaiz))
+    }
+
+    execCriarIndice(cmd: Ast.Comando): ResultadoProprio {
+        var res = ResultadoProprio()
+        var tab: Cat.DefinicaoTabela = isto.catalogo.obterTabela(cmd.tabela)
+        isto.criarIndiceInterno(tab, cmd.nomeIndice, cmd.colunasNomes, cmd.indiceUnico)
+        isto.confirmarSeAutocommit()
+        res.mensagem = "Índice '${cmd.nomeIndice}' criado em '${cmd.tabela}'."
+        retorna res
+    }
+
+    execRemoverIndice(cmd: Ast.Comando): ResultadoProprio {
+        var res = ResultadoProprio()
+        var removido: logico = falso
+        para (var t: inteiro = 0; t < isto.catalogo.tabelas.tamanho(); t = t + 1) {
+            var tab: Cat.DefinicaoTabela = isto.catalogo.tabelas[t]
+            var novos: Cat.DefinicaoIndice[] = []
+            para (var i: inteiro = 0; i < tab.indices.tamanho(); i = i + 1) {
+                se (tab.indices[i].nome.minusculo() == cmd.nomeIndice.minusculo()) {
+                    removido = verdadeiro
+                } senao {
+                    novos.adicionar(tab.indices[i])
+                }
+            }
+            tab.indices = novos
+        }
+        se (!removido e !cmd.seExistir) {
+            falhar "Índice '${cmd.nomeIndice}' não encontrado."
+        }
+        isto.confirmarSeAutocommit()
+        res.mensagem = "Índice '${cmd.nomeIndice}' removido."
+        retorna res
+    }
+
+    validarRestricoesLinha(tab: Cat.DefinicaoTabela, valores: Val.Valor[]): vazio {
+        para (var c: inteiro = 0; c < tab.colunas.tamanho(); c = c + 1) {
+            var col: Cat.DefinicaoColuna = tab.colunas[c]
+            var v: Val.Valor = valores[c]
+            se (!col.permiteNulo e v.ehNulo()) {
+                falhar "Violação de restrição NAO NULO na coluna '${col.nome}' da tabela '${tab.nome}'."
+            }
+            // Integridade referencial (CHAVE ESTRANGEIRA)
+            se (col.referenciaTabela != "" e !v.ehNulo()) {
+                var tabRef: qualquer = isto.catalogo.obterTabela(col.referenciaTabela)
+                se (tabRef == nulo) {
+                    falhar "Tabela referenciada '${col.referenciaTabela}' não existe."
+                }
+                var colRefIdx: inteiro = tabRef.indiceColuna(col.referenciaColuna)
+                var achouRef: logico = falso
+                var indRef: qualquer = tabRef.obterIndicePorColuna(col.referenciaColuna)
+                se (indRef != nulo) {
+                    var arvRef = BTree.ArvoreBMais(isto.pager, indRef.paginaRaiz, indRef.unico)
+                    achouRef = arvRef.buscarExato(v).tamanho() > 0
+                } senao {
+                    var recsRef: Reg.RegistroLido[] = isto.armazenamento.varrerTabela(tabRef.paginaRaizDados)
+                    para (var r: inteiro = 0; r < recsRef.tamanho(); r = r + 1) {
+                        se (Val.compararTotal(recsRef[r].valores[colRefIdx], v) == 0) {
+                            achouRef = verdadeiro
+                            sustar
+                        }
+                    }
+                }
+                se (!achouRef) {
+                    falhar "Violação de chave estrangeira em '${tab.nome}.${col.nome}': valor '${v.paraTexto()}' não existe em '${col.referenciaTabela}.${col.referenciaColuna}'."
+                }
+            }
+        }
+    }
+
+    execInserir(cmd: Ast.Comando, paramsPos: Val.Valor[], paramsNom: dicionario): ResultadoProprio {
+        var res = ResultadoProprio()
+        var tab: Cat.DefinicaoTabela = isto.catalogo.obterTabela(cmd.tabela)
+        var ctxVazio = Eval.ContextoLinha([], [], [], paramsPos, paramsNom)
+
+        para (var li: inteiro = 0; li < cmd.linhasValores.tamanho(); li = li + 1) {
+            var exprsLinha: Ast.Expressao[] = cmd.linhasValores[li]
+            var tupla: Val.Valor[] = []
+            para (var c: inteiro = 0; c < tab.colunas.tamanho(); c = c + 1) {
+                tupla.adicionar(Val.Valor.nuloVal())
+            }
+
+            se (cmd.colunasNomes.tamanho() == 0) {
+                se (exprsLinha.tamanho() != tab.colunas.tamanho()) {
+                    falhar "INSERIR sem lista de colunas exige ${tab.colunas.tamanho()} valores, recebidos ${exprsLinha.tamanho()}."
+                }
+                para (var k: inteiro = 0; k < exprsLinha.tamanho(); k = k + 1) {
+                    tupla[k] = Eval.avaliarExpressao(exprsLinha[k], ctxVazio)
+                }
+            } senao {
+                para (var m: inteiro = 0; m < cmd.colunasNomes.tamanho(); m = m + 1) {
+                    var idxCol: inteiro = tab.indiceColuna(cmd.colunasNomes[m])
+                    tupla[idxCol] = Eval.avaliarExpressao(exprsLinha[m], ctxVazio)
+                }
+            }
+
+            // Aplica AUTO INCREMENTO e valores PADRAO
+            para (var ci: inteiro = 0; ci < tab.colunas.tamanho(); ci = ci + 1) {
+                var colDef: Cat.DefinicaoColuna = tab.colunas[ci]
+                se (tupla[ci].ehNulo()) {
+                    se (colDef.autoIncremento) {
+                        var idGerado: inteiro = tab.proximoAutoInc
+                        tab.proximoAutoInc = tab.proximoAutoInc + 1
+                        tupla[ci] = Val.Valor.deInteiro(idGerado)
+                        res.ultimoId = idGerado
+                    } senao se (colDef.temPadrao) {
+                        tupla[ci] = colDef.valorPadrao
+                    }
+                } senao se (colDef.autoIncremento e tupla[ci].tipoDado == Val.TipoDado.Inteiro) {
+                    se (tupla[ci].inteiroVal >= tab.proximoAutoInc) {
+                        tab.proximoAutoInc = tupla[ci].inteiroVal + 1
+                    }
+                    res.ultimoId = tupla[ci].inteiroVal
+                }
+            }
+
+            isto.validarRestricoesLinha(tab, tupla)
+
+            var rid: Reg.IdRegistro = isto.armazenamento.inserirRegistro(tab.paginaRaizDados, tupla)
+            // Atualiza todos os índices B+ Tree da tabela (propagando nova raiz em caso de split!)
+            para (var ii: inteiro = 0; ii < tab.indices.tamanho(); ii = ii + 1) {
+                var ind: Cat.DefinicaoIndice = tab.indices[ii]
+                var idxColInd: inteiro = tab.indiceColuna(ind.colunas[0])
+                var arvore = BTree.ArvoreBMais(isto.pager, ind.paginaRaiz, ind.unico)
+                arvore.inserir(tupla[idxColInd], rid)
+                ind.paginaRaiz = arvore.paginaRaiz
+            }
+            tab.estimativaLinhas = tab.estimativaLinhas + 1
+            res.linhasAfetadas = res.linhasAfetadas + 1
+        }
+        isto.confirmarSeAutocommit()
+        retorna res
+    }
+
+    execAtualizar(cmd: Ast.Comando, paramsPos: Val.Valor[], paramsNom: dicionario): ResultadoProprio {
+        var res = ResultadoProprio()
+        var tab: Cat.DefinicaoTabela = isto.catalogo.obterTabela(cmd.tabela)
+        var nomesCols: texto[] = []
+        var tabsCols: texto[] = []
+        para (var c: inteiro = 0; c < tab.colunas.tamanho(); c = c + 1) {
+            nomesCols.adicionar(tab.colunas[c].nome)
+            tabsCols.adicionar(tab.nome)
+        }
+
+        var registros: Reg.RegistroLido[] = isto.armazenamento.varrerTabela(tab.paginaRaizDados)
+        para (var i: inteiro = 0; i < registros.tamanho(); i = i + 1) {
+            var rec: Reg.RegistroLido = registros[i]
+            var ctx = Eval.ContextoLinha(nomesCols, tabsCols, rec.valores, paramsPos, paramsNom)
+            se (cmd.condicaoOnde != nulo e !Eval.avaliarCondicao(cmd.condicaoOnde, ctx)) {
+                continua
+            }
+            var novosVals: Val.Valor[] = []
+            para (var k: inteiro = 0; k < rec.valores.tamanho(); k = k + 1) {
+                novosVals.adicionar(rec.valores[k])
+            }
+            para (var a: inteiro = 0; a < cmd.atribuicoes.tamanho(); a = a + 1) {
+                var atr: Ast.AtribuicaoAst = cmd.atribuicoes[a]
+                var idxCol: inteiro = tab.indiceColuna(atr.coluna)
+                novosVals[idxCol] = Eval.avaliarExpressao(atr.valor, ctx)
+            }
+            isto.validarRestricoesLinha(tab, novosVals)
+
+            // Remove entradas antigas dos índices
+            para (var ii: inteiro = 0; ii < tab.indices.tamanho(); ii = ii + 1) {
+                var ind: Cat.DefinicaoIndice = tab.indices[ii]
+                var colI: inteiro = tab.indiceColuna(ind.colunas[0])
+                var arvore = BTree.ArvoreBMais(isto.pager, ind.paginaRaiz, ind.unico)
+                arvore.excluir(rec.valores[colI], rec.rid)
+            }
+            var novoRid: Reg.IdRegistro = isto.armazenamento.atualizarRegistro(tab.paginaRaizDados, rec.rid, novosVals)
+            // Insere novas entradas nos índices
+            para (var ii2: inteiro = 0; ii2 < tab.indices.tamanho(); ii2 = ii2 + 1) {
+                var ind2: Cat.DefinicaoIndice = tab.indices[ii2]
+                var colI2: inteiro = tab.indiceColuna(ind2.colunas[0])
+                var arvore2 = BTree.ArvoreBMais(isto.pager, ind2.paginaRaiz, ind2.unico)
+                arvore2.inserir(novosVals[colI2], novoRid)
+                ind2.paginaRaiz = arvore2.paginaRaiz
+            }
+            res.linhasAfetadas = res.linhasAfetadas + 1
+        }
+        isto.confirmarSeAutocommit()
+        retorna res
+    }
+
+    execExcluir(cmd: Ast.Comando, paramsPos: Val.Valor[], paramsNom: dicionario): ResultadoProprio {
+        var res = ResultadoProprio()
+        var tab: Cat.DefinicaoTabela = isto.catalogo.obterTabela(cmd.tabela)
+        var nomesCols: texto[] = []
+        var tabsCols: texto[] = []
+        para (var c: inteiro = 0; c < tab.colunas.tamanho(); c = c + 1) {
+            nomesCols.adicionar(tab.colunas[c].nome)
+            tabsCols.adicionar(tab.nome)
+        }
+
+        var registros: Reg.RegistroLido[] = isto.armazenamento.varrerTabela(tab.paginaRaizDados)
+        para (var i: inteiro = 0; i < registros.tamanho(); i = i + 1) {
+            var rec: Reg.RegistroLido = registros[i]
+            var ctx = Eval.ContextoLinha(nomesCols, tabsCols, rec.valores, paramsPos, paramsNom)
+            se (cmd.condicaoOnde != nulo e !Eval.avaliarCondicao(cmd.condicaoOnde, ctx)) {
+                continua
+            }
+            // Remove das B+ Trees
+            para (var ii: inteiro = 0; ii < tab.indices.tamanho(); ii = ii + 1) {
+                var ind: Cat.DefinicaoIndice = tab.indices[ii]
+                var colI: inteiro = tab.indiceColuna(ind.colunas[0])
+                var arvore = BTree.ArvoreBMais(isto.pager, ind.paginaRaiz, ind.unico)
+                arvore.excluir(rec.valores[colI], rec.rid)
+            }
+            isto.armazenamento.excluirRegistro(rec.rid)
+            se (tab.estimativaLinhas > 0) {
+                tab.estimativaLinhas = tab.estimativaLinhas - 1
+            }
+            res.linhasAfetadas = res.linhasAfetadas + 1
+        }
+        isto.confirmarSeAutocommit()
+        retorna res
+    }
+
+    execExplicar(cmd: Ast.Comando, paramsPos: Val.Valor[], paramsNom: dicionario): ResultadoProprio {
+        var res = ResultadoProprio()
+        res.colunas = ["plano"]
+        se (cmd.comandoAlvo == nulo) { retorna res }
+        var alvo: Ast.Comando = cmd.comandoAlvo
+        se (alvo.tipoCmd == Ast.TipoComando.Selecionar e alvo.tabela != "") {
+            var tab: Cat.DefinicaoTabela = isto.catalogo.obterTabela(alvo.tabela)
+            var plano: Opt.PlanoConsulta = isto.otimizador.planejarSelecao(alvo, tab)
+            var desc: texto = plano.descrever()
+            se (cmd.analisarExecucao) {
+                var t0: real = Tmp.Tempo.agoraMs()
+                var rExec: ResultadoProprio = isto.execSelecionar(alvo, paramsPos, paramsNom)
+                var dt: real = Tmp.Tempo.agoraMs() - t0
+                desc = desc + " | execucaoReal[linhas=${rExec.linhas.tamanho()}, tempoMs=${dt}]"
+            }
+            res.planoTexto = desc
+            res.linhas.adicionar([Val.Valor.deTexto(desc)])
+        } senao {
+            var descGen: texto = "Plano[comando=${alvo.tabela}]"
+            res.planoTexto = descGen
+            res.linhas.adicionar([Val.Valor.deTexto(descGen)])
+        }
+        retorna res
+    }
+
+    execSelecionar(cmd: Ast.Comando, paramsPos: Val.Valor[], paramsNom: dicionario): ResultadoProprio {
+        var res = ResultadoProprio()
+        // SELECIONAR sem tabela (ex: SELECIONAR 1 + 2)
+        se (cmd.tabela == "") {
+            var ctxS = Eval.ContextoLinha([], [], [], paramsPos, paramsNom)
+            var linhaS: Val.Valor[] = []
+            para (var si: inteiro = 0; si < cmd.itensSelecao.tamanho(); si = si + 1) {
+                var it: Ast.ItemSelecao = cmd.itensSelecao[si]
+                res.colunas.adicionar(it.apelido != "" ? it.apelido : "col_" + texto(si + 1))
+                linhaS.adicionar(Eval.avaliarExpressao(it.expressao, ctxS))
+            }
+            res.linhas.adicionar(linhaS)
+            retorna res
+        }
+
+        var tabBase: Cat.DefinicaoTabela = isto.catalogo.obterTabela(cmd.tabela)
+        var plano: Opt.PlanoConsulta = isto.otimizador.planejarSelecao(cmd, tabBase)
+        res.planoTexto = plano.descrever()
+
+        var apelidoBase: texto = cmd.apelidoTabela != "" ? cmd.apelidoTabela : tabBase.nome
+        var nomesCols: texto[] = []
+        var tabsCols: texto[] = []
+        para (var c: inteiro = 0; c < tabBase.colunas.tamanho(); c = c + 1) {
+            nomesCols.adicionar(tabBase.colunas[c].nome)
+            tabsCols.adicionar(apelidoBase)
+        }
+
+        // 1. Leitura física (via Índice B+ Tree ou Varredura Sequencial)
+        var linhasCorrentes: qualquer[] = [] // Val.Valor[][]
+        se (plano.estrategia == Opt.EstrategiaAcesso.BuscaIndiceExata) {
+            var arvEx = BTree.ArvoreBMais(isto.pager, plano.paginaRaizIndice, falso)
+            var ridsEx: Reg.IdRegistro[] = arvEx.buscarExato(plano.chaveExata)
+            para (var ri: inteiro = 0; ri < ridsEx.tamanho(); ri = ri + 1) {
+                var recEx: qualquer = isto.armazenamento.lerRegistro(ridsEx[ri])
+                se (recEx != nulo) { linhasCorrentes.adicionar(recEx) }
+            }
+        } senao se (plano.estrategia == Opt.EstrategiaAcesso.VarreduraIndiceIntervalo) {
+            var arvInt = BTree.ArvoreBMais(isto.pager, plano.paginaRaizIndice, falso)
+            var ridsInt: Reg.IdRegistro[] = arvInt.buscarIntervalo(plano.chaveMin, plano.incluirMin, plano.chaveMax, plano.incluirMax)
+            para (var rj: inteiro = 0; rj < ridsInt.tamanho(); rj = rj + 1) {
+                var recInt: qualquer = isto.armazenamento.lerRegistro(ridsInt[rj])
+                se (recInt != nulo) { linhasCorrentes.adicionar(recInt) }
+            }
+        } senao {
+            var recsSeq: Reg.RegistroLido[] = isto.armazenamento.varrerTabela(tabBase.paginaRaizDados)
+            para (var rk: inteiro = 0; rk < recsSeq.tamanho(); rk = rk + 1) {
+                linhasCorrentes.adicionar(recsSeq[rk].valores)
+            }
+        }
+        isto.linhasProcessadas = isto.linhasProcessadas + linhasCorrentes.tamanho()
+
+        // 2. Operador de Junções (INTERNA, ESQUERDA, DIREITA, CRUZADA)
+        para (var ji: inteiro = 0; ji < cmd.juncoes.tamanho(); ji = ji + 1) {
+            var junc: Ast.ClausulaJuncao = cmd.juncoes[ji]
+            var tabDir: Cat.DefinicaoTabela = isto.catalogo.obterTabela(junc.tabela)
+            var apelidoDir: texto = junc.apelido != "" ? junc.apelido : tabDir.nome
+            var recsDir: Reg.RegistroLido[] = isto.armazenamento.varrerTabela(tabDir.paginaRaizDados)
+
+            var novosNomes: texto[] = []
+            var novasTabs: texto[] = []
+            para (var a1: inteiro = 0; a1 < nomesCols.tamanho(); a1 = a1 + 1) {
+                novosNomes.adicionar(nomesCols[a1])
+                novasTabs.adicionar(tabsCols[a1])
+            }
+            para (var a2: inteiro = 0; a2 < tabDir.colunas.tamanho(); a2 = a2 + 1) {
+                novosNomes.adicionar(tabDir.colunas[a2].nome)
+                novasTabs.adicionar(apelidoDir)
+            }
+
+            var linhasJuncao: qualquer[] = []
+            var qtdColsEsq: inteiro = nomesCols.tamanho()
+            var qtdColsDir: inteiro = tabDir.colunas.tamanho()
+
+            para (var le: inteiro = 0; le < linhasCorrentes.tamanho(); le = le + 1) {
+                var vEsq: Val.Valor[] = linhasCorrentes[le]
+                var combinouEsq: logico = falso
+                para (var ld: inteiro = 0; ld < recsDir.tamanho(); ld = ld + 1) {
+                    var vDir: Val.Valor[] = recsDir[ld].valores
+                    var comb: Val.Valor[] = []
+                    para (var x1: inteiro = 0; x1 < qtdColsEsq; x1 = x1 + 1) { comb.adicionar(vEsq[x1]) }
+                    para (var x2: inteiro = 0; x2 < qtdColsDir; x2 = x2 + 1) { comb.adicionar(vDir[x2]) }
+
+                    var okJ: logico = verdadeiro
+                    se (junc.condicao != nulo) {
+                        var ctxJ = Eval.ContextoLinha(novosNomes, novasTabs, comb, paramsPos, paramsNom)
+                        okJ = Eval.avaliarCondicao(junc.condicao, ctxJ)
+                    }
+                    se (okJ) {
+                        linhasJuncao.adicionar(comb)
+                        combinouEsq = verdadeiro
+                    }
+                }
+                se (!combinouEsq e (junc.tipoJuncao == Ast.TipoJuncao.Esquerda ou junc.tipoJuncao == Ast.TipoJuncao.Completa)) {
+                    var combN: Val.Valor[] = []
+                    para (var y1: inteiro = 0; y1 < qtdColsEsq; y1 = y1 + 1) { combN.adicionar(vEsq[y1]) }
+                    para (var y2: inteiro = 0; y2 < qtdColsDir; y2 = y2 + 1) { combN.adicionar(Val.Valor.nuloVal()) }
+                    linhasJuncao.adicionar(combN)
+                }
+            }
+            nomesCols = novosNomes
+            tabsCols = novasTabs
+            linhasCorrentes = linhasJuncao
+        }
+
+        // 3. Filtro ONDE (usando condição otimizada)
+        var condFinal: qualquer = plano.condicaoOtimizada != nulo ? plano.condicaoOtimizada : cmd.condicaoOnde
+        var linhasFiltradas: qualquer[] = []
+        se (condFinal != nulo) {
+            para (var fi: inteiro = 0; fi < linhasCorrentes.tamanho(); fi = fi + 1) {
+                var ctxF = Eval.ContextoLinha(nomesCols, tabsCols, linhasCorrentes[fi], paramsPos, paramsNom)
+                se (Eval.avaliarCondicao(condFinal, ctxF)) {
+                    linhasFiltradas.adicionar(linhasCorrentes[fi])
+                }
+            }
+        } senao {
+            linhasFiltradas = linhasCorrentes
+        }
+
+        // 4. Verifica se há agregação ou AGRUPAR POR
+        var temAgregacao: logico = cmd.agruparPor.tamanho() > 0
+        se (!temAgregacao) {
+            para (var agi: inteiro = 0; agi < cmd.itensSelecao.tamanho(); agi = agi + 1) {
+                se (expressaoContemAgregacao(cmd.itensSelecao[agi].expressao)) {
+                    temAgregacao = verdadeiro
+                    sustar
+                }
+            }
+        }
+
+        var linhasProjetadas: qualquer[] = []
+        var nomesSaida: texto[] = []
+
+        se (temAgregacao) {
+            // Agrupamento por chave composta
+            var chavesGrupo: texto[] = []
+            var grupos: qualquer[] = [] // cada grupo é Val.Valor[][]
+
+            se (cmd.agruparPor.tamanho() == 0) {
+                chavesGrupo.adicionar("__UNICO__")
+                grupos.adicionar(linhasFiltradas)
+            } senao {
+                para (var gi: inteiro = 0; gi < linhasFiltradas.tamanho(); gi = gi + 1) {
+                    var ctxG = Eval.ContextoLinha(nomesCols, tabsCols, linhasFiltradas[gi], paramsPos, paramsNom)
+                    var chaveStr: texto = ""
+                    para (var gp: inteiro = 0; gp < cmd.agruparPor.tamanho(); gp = gp + 1) {
+                        se (gp > 0) { chaveStr = chaveStr + "\t|\t" }
+                        chaveStr = chaveStr + Eval.avaliarExpressao(cmd.agruparPor[gp], ctxG).paraTexto()
+                    }
+                    var idxGrp: inteiro = -1
+                    para (var kG: inteiro = 0; kG < chavesGrupo.tamanho(); kG = kG + 1) {
+                        se (chavesGrupo[kG] == chaveStr) { idxGrp = kG; sustar }
+                    }
+                    se (idxGrp < 0) {
+                        chavesGrupo.adicionar(chaveStr)
+                        grupos.adicionar([linhasFiltradas[gi]])
+                    } senao {
+                        grupos[idxGrp].adicionar(linhasFiltradas[gi])
+                    }
+                }
+            }
+
+            // Nomes de saída
+            para (var ns: inteiro = 0; ns < cmd.itensSelecao.tamanho(); ns = ns + 1) {
+                var itS: Ast.ItemSelecao = cmd.itensSelecao[ns]
+                se (itS.apelido != "") { nomesSaida.adicionar(itS.apelido) }
+                senao se (itS.expressao.tipoExpr == Ast.TipoExpressao.Coluna) { nomesSaida.adicionar(itS.expressao.nome) }
+                senao se (itS.expressao.tipoExpr == Ast.TipoExpressao.Chamada) { nomesSaida.adicionar(itS.expressao.nome) }
+                senao { nomesSaida.adicionar("col_" + texto(ns + 1)) }
+            }
+
+            // Avalia cada grupo + TENDO
+            para (var gIdx: inteiro = 0; gIdx < grupos.tamanho(); gIdx = gIdx + 1) {
+                var linhasGrp: qualquer[] = grupos[gIdx]
+                se (cmd.condicaoTendo != nulo) {
+                    var valTendo: Val.Valor = isto.avaliarExpressaoAgregada(cmd.condicaoTendo, linhasGrp, nomesCols, tabsCols, paramsPos, paramsNom)
+                    se (Eval.valorParaTriLogico(valTendo) != Val.TriLogico.Verdadeiro) {
+                        continua
+                    }
+                }
+                var linhaProj: Val.Valor[] = []
+                para (var pi: inteiro = 0; pi < cmd.itensSelecao.tamanho(); pi = pi + 1) {
+                    linhaProj.adicionar(isto.avaliarExpressaoAgregada(cmd.itensSelecao[pi].expressao, linhasGrp, nomesCols, tabsCols, paramsPos, paramsNom))
+                }
+                linhasProjetadas.adicionar(linhaProj)
+            }
+        } senao {
+            // Projeção simples (expandindo '*')
+            para (var pi2: inteiro = 0; pi2 < cmd.itensSelecao.tamanho(); pi2 = pi2 + 1) {
+                var it2: Ast.ItemSelecao = cmd.itensSelecao[pi2]
+                se (it2.expressao.tipoExpr == Ast.TipoExpressao.Asterisco) {
+                    para (var nc: inteiro = 0; nc < nomesCols.tamanho(); nc = nc + 1) {
+                        se (it2.expressao.tabelaRef == "" ou tabsCols[nc].minusculo() == it2.expressao.tabelaRef.minusculo()) {
+                            nomesSaida.adicionar(nomesCols[nc])
+                        }
+                    }
+                } senao se (it2.apelido != "") {
+                    nomesSaida.adicionar(it2.apelido)
+                } senao se (it2.expressao.tipoExpr == Ast.TipoExpressao.Coluna) {
+                    nomesSaida.adicionar(it2.expressao.nome)
+                } senao {
+                    nomesSaida.adicionar("col_" + texto(pi2 + 1))
+                }
+            }
+
+            para (var li2: inteiro = 0; li2 < linhasFiltradas.tamanho(); li2 = li2 + 1) {
+                var linhaIn: Val.Valor[] = linhasFiltradas[li2]
+                var ctxP = Eval.ContextoLinha(nomesCols, tabsCols, linhaIn, paramsPos, paramsNom)
+                var linhaOut: Val.Valor[] = []
+                para (var ps: inteiro = 0; ps < cmd.itensSelecao.tamanho(); ps = ps + 1) {
+                    var itP: Ast.ItemSelecao = cmd.itensSelecao[ps]
+                    se (itP.expressao.tipoExpr == Ast.TipoExpressao.Asterisco) {
+                        para (var nc2: inteiro = 0; nc2 < nomesCols.tamanho(); nc2 = nc2 + 1) {
+                            se (itP.expressao.tabelaRef == "" ou tabsCols[nc2].minusculo() == itP.expressao.tabelaRef.minusculo()) {
+                                linhaOut.adicionar(linhaIn[nc2])
+                            }
+                        }
+                    } senao {
+                        linhaOut.adicionar(Eval.avaliarExpressao(itP.expressao, ctxP))
+                    }
+                }
+                linhasProjetadas.adicionar(linhaOut)
+            }
+        }
+
+        // 5. DISTINTO
+        se (cmd.distinto) {
+            var unicas: qualquer[] = []
+            var vistas: texto[] = []
+            para (var di: inteiro = 0; di < linhasProjetadas.tamanho(); di = di + 1) {
+                var lp: Val.Valor[] = linhasProjetadas[di]
+                var assinatura: texto = ""
+                para (var dc: inteiro = 0; dc < lp.tamanho(); dc = dc + 1) {
+                    se (dc > 0) { assinatura = assinatura + "\t|\t" }
+                    assinatura = assinatura + lp[dc].paraTexto()
+                }
+                var jaExiste: logico = falso
+                para (var dv: inteiro = 0; dv < vistas.tamanho(); dv = dv + 1) {
+                    se (vistas[dv] == assinatura) { jaExiste = verdadeiro; sustar }
+                }
+                se (!jaExiste) {
+                    vistas.adicionar(assinatura)
+                    unicas.adicionar(lp)
+                }
+            }
+            linhasProjetadas = unicas
+        }
+
+        // 6. ORDENAR POR (MergeSort estável)
+        se (cmd.ordenarPor.tamanho() > 0 e linhasProjetadas.tamanho() > 1) {
+            var tabsVazias: texto[] = []
+            para (var tv: inteiro = 0; tv < nomesSaida.tamanho(); tv = tv + 1) { tabsVazias.adicionar("") }
+            var chavesOrd: qualquer[] = []
+            var indicesOrd: inteiro[] = []
+            var descFlags: logico[] = []
+            para (var od: inteiro = 0; od < cmd.ordenarPor.tamanho(); od = od + 1) {
+                descFlags.adicionar(cmd.ordenarPor[od].descendente)
+            }
+            para (var oi: inteiro = 0; oi < linhasProjetadas.tamanho(); oi = oi + 1) {
+                var ctxO = Eval.ContextoLinha(nomesSaida, tabsVazias, linhasProjetadas[oi], paramsPos, paramsNom)
+                var chLinha: Val.Valor[] = []
+                para (var ok: inteiro = 0; ok < cmd.ordenarPor.tamanho(); ok = ok + 1) {
+                    chLinha.adicionar(Eval.avaliarExpressao(cmd.ordenarPor[ok].expressao, ctxO))
+                }
+                chavesOrd.adicionar(chLinha)
+                indicesOrd.adicionar(oi)
+            }
+            var ordenadosIdx: inteiro[] = ordenarIndicesMerge(indicesOrd, chavesOrd, descFlags)
+            var reordenadas: qualquer[] = []
+            para (var rIdx: inteiro = 0; rIdx < ordenadosIdx.tamanho(); rIdx = rIdx + 1) {
+                reordenadas.adicionar(linhasProjetadas[ordenadosIdx[rIdx]])
+            }
+            linhasProjetadas = reordenadas
+        }
+
+        // 7. LIMITE e DESLOCAMENTO
+        se (cmd.deslocamento > 0 ou cmd.limite >= 0) {
+            var fatiadas: qualquer[] = []
+            var inicioF: inteiro = cmd.deslocamento
+            var fimF: inteiro = cmd.limite >= 0 ? (inicioF + cmd.limite) : linhasProjetadas.tamanho()
+            se (fimF > linhasProjetadas.tamanho()) { fimF = linhasProjetadas.tamanho() }
+            para (var sl: inteiro = inicioF; sl < fimF; sl = sl + 1) {
+                fatiadas.adicionar(linhasProjetadas[sl])
+            }
+            linhasProjetadas = fatiadas
+        }
+
+        res.colunas = nomesSaida
+        res.linhas = linhasProjetadas
+        isto.linhasRetornadas = isto.linhasRetornadas + linhasProjetadas.tamanho()
+        retorna res
+    }
+
+    avaliarExpressaoAgregada(
+        expr: Ast.Expressao,
+        linhasGrp: qualquer[],
+        nomesCols: texto[],
+        tabsCols: texto[],
+        paramsPos: Val.Valor[],
+        paramsNom: dicionario
+    ): Val.Valor {
+        se (expr.tipoExpr == Ast.TipoExpressao.Chamada e ehFuncaoAgregadora(expr.nome)) {
+            var fn: texto = expr.nome.maiusculo()
+            se (fn == "CONTAR") {
+                se (expr.argumentos.tamanho() == 0 ou expr.argumentos[0].tipoExpr == Ast.TipoExpressao.Asterisco) {
+                    retorna Val.Valor.deInteiro(linhasGrp.tamanho())
+                }
+                var cnt: inteiro = 0
+                para (var i: inteiro = 0; i < linhasGrp.tamanho(); i = i + 1) {
+                    var ctxC = Eval.ContextoLinha(nomesCols, tabsCols, linhasGrp[i], paramsPos, paramsNom)
+                    var vC: Val.Valor = Eval.avaliarExpressao(expr.argumentos[0], ctxC)
+                    se (!vC.ehNulo()) { cnt = cnt + 1 }
+                }
+                retorna Val.Valor.deInteiro(cnt)
+            }
+            var somaR: real = 0.0
+            var qtdValidos: inteiro = 0
+            var minV: qualquer = nulo
+            var maxV: qualquer = nulo
+            para (var j: inteiro = 0; j < linhasGrp.tamanho(); j = j + 1) {
+                var ctxA = Eval.ContextoLinha(nomesCols, tabsCols, linhasGrp[j], paramsPos, paramsNom)
+                var vA: Val.Valor = Eval.avaliarExpressao(expr.argumentos[0], ctxA)
+                se (vA.ehNulo()) { continua }
+                qtdValidos = qtdValidos + 1
+                somaR = somaR + vA.comoReal()
+                se (minV == nulo ou Val.compararTotal(vA, minV) < 0) { minV = vA }
+                se (maxV == nulo ou Val.compararTotal(vA, maxV) > 0) { maxV = vA }
+            }
+            se (qtdValidos == 0) { retorna Val.Valor.nuloVal() }
+            se (fn == "SOMA") { retorna Val.Valor.deReal(somaR) }
+            se (fn == "MEDIA" ou fn == "MÉDIA") { retorna Val.Valor.deReal(somaR / real(qtdValidos)) }
+            se (fn == "MINIMO" ou fn == "MÍNIMO") { retorna minV }
+            se (fn == "MAXIMO" ou fn == "MÁXIMO") { retorna maxV }
+        }
+        se (expr.tipoExpr == Ast.TipoExpressao.Binaria) {
+            var a = isto.avaliarExpressaoAgregada(expr.esquerda, linhasGrp, nomesCols, tabsCols, paramsPos, paramsNom)
+            var b = isto.avaliarExpressaoAgregada(expr.direita, linhasGrp, nomesCols, tabsCols, paramsPos, paramsNom)
+            var synth = Ast.Expressao.binaria(expr.operador, Ast.Expressao.literal(a, expr.intervalo), Ast.Expressao.literal(b, expr.intervalo), expr.intervalo)
+            retorna Eval.avaliarExpressao(synth, Eval.ContextoLinha([], [], []))
+        }
+        se (linhasGrp.tamanho() == 0) {
+            retorna Val.Valor.nuloVal()
+        }
+        var ctx0 = Eval.ContextoLinha(nomesCols, tabsCols, linhasGrp[0], paramsPos, paramsNom)
+        retorna Eval.avaliarExpressao(expr, ctx0)
+    }
+
+    // Verificador integral de integridade (somente leitura, não modifica o banco).
+    verificarIntegridade(): texto[] {
+        var erros: texto[] = []
+        se (!isto.aberto) { isto.abrir() }
+        // 1. Verifica cabeçalho e checksum de todas as páginas
+        var pag0 = isto.pager.obterPagina(0)
+        se (!Fmt.validarCabecalhoBanco(pag0)) {
+            erros.adicionar("Cabeçalho do banco (página 0) inválido ou CRC32 incorreto.")
+        }
+        para (var p: inteiro = 1; p < isto.pager.totalPaginas; p = p + 1) {
+            var buf = isto.pager.obterPagina(p)
+            se (!Fmt.verificarChecksumPagina(buf)) {
+                erros.adicionar("CRC32 inválido na página ${p}.")
+            }
+        }
+        // 2. Verifica todas as B+ Trees de todas as tabelas
+        para (var t: inteiro = 0; t < isto.catalogo.tabelas.tamanho(); t = t + 1) {
+            var tab: Cat.DefinicaoTabela = isto.catalogo.tabelas[t]
+            var regs: Reg.RegistroLido[] = isto.armazenamento.varrerTabela(tab.paginaRaizDados)
+            para (var ii: inteiro = 0; ii < tab.indices.tamanho(); ii = ii + 1) {
+                var ind: Cat.DefinicaoIndice = tab.indices[ii]
+                var arv = BTree.ArvoreBMais(isto.pager, ind.paginaRaiz, ind.unico)
+                var errosArv: texto[] = arv.verificarIntegridade()
+                para (var eIdx: inteiro = 0; eIdx < errosArv.tamanho(); eIdx = eIdx + 1) {
+                    erros.adicionar("Índice ${ind.nome}: " + errosArv[eIdx])
+                }
+                se (arv.listarOrdenado().tamanho() != regs.tamanho()) {
+                    erros.adicionar("Índice ${ind.nome} tem ${arv.listarOrdenado().tamanho()} entradas, mas tabela ${tab.nome} tem ${regs.tamanho()} registros.")
+                }
+            }
+        }
+        retorna erros
+    }
+
+    // Backup consistente para um arquivo destino .lce.
+    copiarPara(caminhoDestino: texto): vazio {
+        se (!isto.aberto) { isto.abrir() }
+        PersCat.salvarCatalogo(isto.pager, isto.catalogo)
+        isto.pager.descarregarTodas()
+        var fdDest: inteiro = Pio.PosixIO.open(caminhoDestino, Pio.flagsCriarTruncado(), Pio.modoArquivoPadrao())
+        se (fdDest < 0) { falhar "Falha ao criar arquivo de cópia: " + caminhoDestino }
+        var fpDest: inteiro = Pio.PosixIO.fdopen(fdDest, "r+b")
+        para (var p: inteiro = 0; p < isto.pager.totalPaginas; p = p + 1) {
+            var buf = isto.pager.obterPagina(p)
+            var i: inteiro = 0
+            enquanto (i < 4096) {
+                Pio.PosixIO.fputc(buf.obter(i), fpDest)
+                i = i + 1
+            }
+        }
+        Pio.PosixIO.fflush(fpDest)
+        Pio.PosixIO.fdatasync(fdDest)
+        Pio.PosixIO.close(fdDest)
+    }
+
+    // Estatísticas detalhadas do motor + telemetria do CGD-GC.
+    estatisticas(): dicionario {
+        var stMem: dicionario = Mem.Memoria.estatisticas()
+        retorna {
+            caminho: isto.caminho,
+            totalPaginas: isto.pager.totalPaginas,
+            tamanhoBytes: isto.pager.totalPaginas * 4096,
+            tabelas: isto.catalogo.tabelas.tamanho(),
+            consultasExecutadas: isto.consultasExecutadas,
+            linhasProcessadas: isto.linhasProcessadas,
+            linhasRetornadas: isto.linhasRetornadas,
+            tempoTotalMs: isto.tempoTotalMs,
+            leiturasDisco: isto.pager.leiturasDisco,
+            escritasDisco: isto.pager.escritasDisco,
+            acertosCache: isto.pager.acertosCache,
+            perdasCache: isto.pager.perdasCache,
+            descartesCache: isto.pager.descartesCache,
+            sincronizacoesDisco: isto.pager.sincronizacoesDisco,
+            transacoesConfirmadas: isto.wal.transacoesConfirmadas,
+            transacoesRevertidas: isto.wal.transacoesRevertidas,
+            checkpoints: isto.wal.checkpointsRealizados,
+            indicesSelecionados: isto.otimizador.indicesSelecionados,
+            dobramentosConstantes: isto.otimizador.dobramentosAplicados,
+            backendGC: stMem["backendGC"],
+            ciclosGC: stMem["ciclosGC"],
+            heapBytes: stMem["heapBytes"]
+        }
+    }
+}

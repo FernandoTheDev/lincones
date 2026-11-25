@@ -1,0 +1,39 @@
+// Caso mínimo reproduzível — Defeito observado no CGD-GC v0.10.0
+// Comportamento esperado: campo texto de objeto mantido em vetor de objeto sobrevive a ciclos de coleta do CGD-GC.
+// Comportamento observado: sob alta pressão de alocação de strings antes/durante uso,
+//   com --gc=cgd a string armazenada em objeto pode ser coletada/corrompida ("Texto UTF-8 incompleto"),
+//   enquanto com --gc=boehm executa sem falhas.
+
+classe Item {
+    nome: texto
+    construtor(nome: texto) {
+        isto.nome = nome
+    }
+}
+
+classe Container {
+    itens: Item[]
+    construtor() {
+        isto.itens = []
+    }
+    adicionar(it: Item): vazio {
+        isto.itens.adicionar(it)
+    }
+}
+
+var c = Container()
+c.adicionar(Item("chave_k"))
+c.adicionar(Item("valor_v"))
+
+// Gera pressão de alocação no nursery/heap do CGD-GC
+para (var i: inteiro = 0; i < 40000; i = i + 1) {
+    var lixo: texto = "tmp_" + texto(i) + "_alocacao_pressao_gc"
+    se (lixo.tamanho() < 0) { escreva(lixo) }
+}
+
+para (var j: inteiro = 0; j < c.itens.tamanho(); j = j + 1) {
+    var s: texto = c.itens[j].nome.minusculo()
+    se (j == 0 e s != "chave_k") { falhar "Corrompido: " + s }
+    se (j == 1 e s != "valor_v") { falhar "Corrompido: " + s }
+}
+escreva("reproducao_ok")

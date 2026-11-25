@@ -1,0 +1,248 @@
+modulo terminal.cli
+
+importar cgd.sistema.processos como Proc
+importar cgd.sistema.arquivos como Arq
+importar cgd.sistema.io como Io
+importar api.lincones como Api
+importar execucao.motor_proprio como Motor
+importar terminal.formatacao como FmtOut
+importar catalogo.esquema como Cat
+
+funcao exibirAjuda(): vazio {
+    Io.IO.escreverLinha("LinConEs Nativo v0.1.0 — Motor Universal de Consultas e SGBD Relacional Embarcado")
+    Io.IO.escreverLinha("")
+    Io.IO.escreverLinha("USO:")
+    Io.IO.escreverLinha("  lincones abrir <banco.lce | :memoria:>                    Abre o REPL interativo")
+    Io.IO.escreverLinha("  lincones executar <banco.lce> <arquivo | -c \"consulta\">   Executa consultas LinConEs")
+    Io.IO.escreverLinha("  lincones traduzir --motor=<sqlite|postgresql|mysql> <arquivo | -c \"consulta\">")
+    Io.IO.escreverLinha("  lincones explicar <banco.lce> <arquivo | -c \"consulta\">   Exibe plano de execução")
+    Io.IO.escreverLinha("  lincones verificar <banco.lce>                            Verifica integridade integral")
+    Io.IO.escreverLinha("  lincones recuperar <banco.lce>                            Executa recuperação WAL")
+    Io.IO.escreverLinha("  lincones copia <origem.lce> <destino.lce>                 Cria cópia consistente")
+    Io.IO.escreverLinha("  lincones estatisticas <banco.lce>                         Exibe estatísticas e CGD-GC")
+    Io.IO.escreverLinha("  lincones versao                                           Exibe versão")
+    Io.IO.escreverLinha("  lincones ajuda                                            Exibe esta ajuda")
+    Io.IO.escreverLinha("")
+    Io.IO.escreverLinha("OPÇÕES DE SAÍDA:")
+    Io.IO.escreverLinha("  --formato=tabela|json|csv")
+    Io.IO.escreverLinha("  --estrito                                                 Ativa modo estrito oficial")
+}
+
+funcao comecaComTexto(s: texto, pref: texto): logico {
+    se (s.tamanho() < pref.tamanho()) { retorna falso }
+    retorna s.fatiar(0, pref.tamanho()) == pref
+}
+
+funcao terminaComTexto(s: texto, suf: texto): logico {
+    se (s.tamanho() < suf.tamanho()) { retorna falso }
+    retorna s.fatiar(s.tamanho() - suf.tamanho()) == suf
+}
+
+funcao lerCodigoFonte(args: texto[], indiceInicial: inteiro): texto {
+    para (var i: inteiro = indiceInicial; i < args.tamanho(); i = i + 1) {
+        se (args[i] == "-c" e i + 1 < args.tamanho()) {
+            retorna args[i + 1]
+        }
+        se (!comecaComTexto(args[i], "--")) {
+            retorna Arq.Arquivo(args[i]).ler()
+        }
+    }
+    falhar "Informe um arquivo .lincones ou -c \"consulta\"."
+}
+
+funcao extrairOpcao(args: texto[], prefixo: texto, valorPadrao: texto): texto {
+    para (var i: inteiro = 0; i < args.tamanho(); i = i + 1) {
+        se (comecaComTexto(args[i], prefixo)) {
+            retorna args[i].fatiar(prefixo.tamanho())
+        }
+    }
+    retorna valorPadrao
+}
+
+funcao temFlag(args: texto[], flag: texto): logico {
+    para (var i: inteiro = 0; i < args.tamanho(); i = i + 1) {
+        se (args[i] == flag) { retorna verdadeiro }
+    }
+    retorna falso
+}
+
+funcao executarRepl(caminhoBanco: texto): vazio {
+    var db: Motor.MotorProprio = Api.LinConEs.abrir(caminhoBanco)
+    Io.IO.escreverLinha("LinConEs Nativo v0.1.0 — REPL Interativo (banco: ${caminhoBanco})")
+    Io.IO.escreverLinha("Digite comandos LinConEs terminados por ';' ou .ajuda / .tabelas / .esquema / .estatisticas / .sair")
+    var buffer: texto = ""
+    enquanto (verdadeiro) {
+        Io.IO.escrever(buffer == "" ? "lincones> " : "      ...> ")
+        var linha: qualquer = Io.IO.lerLinha()
+        se (linha == nulo) {
+            Io.IO.escreverLinha("")
+            sustar
+        }
+        var txt: texto = texto(linha).aparar()
+        se (buffer == "" e txt == "") { continua }
+
+        se (buffer == "" e comecaComTexto(txt, ".")) {
+            se (txt == ".sair" ou txt == ".exit") {
+                sustar
+            } senao se (txt == ".ajuda") {
+                Io.IO.escreverLinha(".tabelas        Lista tabelas do catálogo")
+                Io.IO.escreverLinha(".esquema        Exibe colunas e índices")
+                Io.IO.escreverLinha(".estatisticas   Exibe métricas do motor e CGD-GC")
+                Io.IO.escreverLinha(".verificar      Verifica integridade do banco")
+                Io.IO.escreverLinha(".sair           Fecha o banco e encerra")
+            } senao se (txt == ".tabelas") {
+                var nomes: texto[] = db.catalogo.nomesTabelas()
+                se (nomes.tamanho() == 0) {
+                    Io.IO.escreverLinha("(nenhuma tabela)")
+                } senao {
+                    para (var i: inteiro = 0; i < nomes.tamanho(); i = i + 1) {
+                        Io.IO.escreverLinha("  - " + nomes[i])
+                    }
+                }
+            } senao se (txt == ".esquema") {
+                para (var t: inteiro = 0; t < db.catalogo.tabelas.tamanho(); t = t + 1) {
+                    var tab: Cat.DefinicaoTabela = db.catalogo.tabelas[t]
+                    Io.IO.escreverLinha("TABELA ${tab.nome} (paginaRaiz=${tab.paginaRaizDados}, indices=${tab.indices.tamanho()}):")
+                    para (var c: inteiro = 0; c < tab.colunas.tamanho(); c = c + 1) {
+                        var col: Cat.DefinicaoColuna = tab.colunas[c]
+                        Io.IO.escreverLinha("  ${col.nome} (pk=${col.chavePrimaria}, nulo=${col.permiteNulo})")
+                    }
+                }
+            } senao se (txt == ".estatisticas") {
+                var st: dicionario = db.estatisticas()
+                var chaves: texto[] = st.chaves()
+                para (var k: inteiro = 0; k < chaves.tamanho(); k = k + 1) {
+                    Io.IO.escreverLinha("  ${chaves[k]}: ${st[chaves[k]]}")
+                }
+            } senao se (txt == ".verificar") {
+                var errs: texto[] = db.verificarIntegridade()
+                se (errs.tamanho() == 0) {
+                    Io.IO.escreverLinha("Integridade OK (0 problemas).")
+                } senao {
+                    para (var idxE: inteiro = 0; idxE < errs.tamanho(); idxE = idxE + 1) {
+                        Io.IO.erroLinha("ERRO: " + errs[idxE])
+                    }
+                }
+            } senao {
+                Io.IO.erroLinha("Comando de meta desconhecido: " + txt)
+            }
+            continua
+        }
+
+        buffer = buffer == "" ? txt : (buffer + " " + txt)
+        se (terminaComTexto(buffer, ";")) {
+            tente {
+                var res: Motor.ResultadoProprio = db.executar(buffer)
+                Io.IO.escreverLinha(FmtOut.formatarTabela(res))
+            } pegue (erro) {
+                Io.IO.erroLinha("Erro: " + texto(erro))
+            }
+            buffer = ""
+        }
+    }
+    db.fechar()
+}
+
+funcao executarCli(): inteiro {
+    var args: texto[] = Proc.Processo.argumentos()
+    se (args.tamanho() == 0) {
+        exibirAjuda()
+        retorna 0
+    }
+    var sub: texto = args[0].minusculo()
+    se (sub == "ajuda" ou sub == "--ajuda" ou sub == "-a" ou sub == "--help") {
+        exibirAjuda()
+        retorna 0
+    }
+    se (sub == "versao" ou sub == "--versao" ou sub == "-v") {
+        Io.IO.escreverLinha("LinConEs Nativo v0.1.0 (compilado nativamente com CGD v0.10.0 / CGD-GC)")
+        retorna 0
+    }
+
+    tente {
+        se (sub == "abrir") {
+            var caminho: texto = args.tamanho() >= 2 ? args[1] : ":memoria:"
+            executarRepl(caminho)
+            retorna 0
+        }
+        se (sub == "traduzir") {
+            var motorDestino: texto = extrairOpcao(args, "--motor=", "postgresql")
+            var estrito: logico = temFlag(args, "--estrito")
+            var codigoT: texto = lerCodigoFonte(args, 1)
+            var sqlOut: texto = Api.LinConEs.traduzir(codigoT, motorDestino, estrito)
+            Io.IO.escreverLinha(sqlOut)
+            retorna 0
+        }
+        se (sub == "executar") {
+            se (args.tamanho() < 3) { falhar "Uso: lincones executar <banco.lce> <arquivo | -c \"consulta\">" }
+            var formato: texto = extrairOpcao(args, "--formato=", "tabela")
+            var dbE: Motor.MotorProprio = Api.LinConEs.abrir(args[1])
+            var codigoE: texto = lerCodigoFonte(args, 2)
+            var resE: Motor.ResultadoProprio = dbE.executar(codigoE)
+            se (formato == "json") {
+                Io.IO.escreverLinha(FmtOut.formatarJson(resE))
+            } senao se (formato == "csv") {
+                Io.IO.escreverLinha(FmtOut.formatarCsv(resE))
+            } senao {
+                Io.IO.escreverLinha(FmtOut.formatarTabela(resE))
+            }
+            dbE.fechar()
+            retorna 0
+        }
+        se (sub == "explicar") {
+            se (args.tamanho() < 3) { falhar "Uso: lincones explicar <banco.lce> <arquivo | -c \"consulta\">" }
+            var dbX: Motor.MotorProprio = Api.LinConEs.abrir(args[1])
+            var codigoX: texto = lerCodigoFonte(args, 2)
+            var resX: Motor.ResultadoProprio = dbX.executar("EXPLICAR " + codigoX)
+            Io.IO.escreverLinha(resX.planoTexto)
+            dbX.fechar()
+            retorna 0
+        }
+        se (sub == "verificar") {
+            se (args.tamanho() < 2) { falhar "Uso: lincones verificar <banco.lce>" }
+            var dbV: Motor.MotorProprio = Api.LinConEs.abrir(args[1])
+            var errsV: texto[] = dbV.verificarIntegridade()
+            dbV.fechar()
+            se (errsV.tamanho() == 0) {
+                Io.IO.escreverLinha("OK: banco íntegro (0 problemas detectados).")
+                retorna 0
+            }
+            para (var ei: inteiro = 0; ei < errsV.tamanho(); ei = ei + 1) {
+                Io.IO.erroLinha("ERRO: " + errsV[ei])
+            }
+            retorna 2
+        }
+        se (sub == "recuperar") {
+            se (args.tamanho() < 2) { falhar "Uso: lincones recuperar <banco.lce>" }
+            var dbR: Motor.MotorProprio = Api.LinConEs.abrir(args[1])
+            var nRec: inteiro = dbR.wal.transacoesRecuperadas
+            dbR.fechar()
+            Io.IO.escreverLinha("Recuperação concluída. Transações recuperadas do WAL: ${nRec}.")
+            retorna 0
+        }
+        se (sub == "copia") {
+            se (args.tamanho() < 3) { falhar "Uso: lincones copia <origem.lce> <destino.lce>" }
+            var dbC: Motor.MotorProprio = Api.LinConEs.abrir(args[1])
+            dbC.copiarPara(args[2])
+            dbC.fechar()
+            Io.IO.escreverLinha("Cópia consistente criada em: ${args[2]}")
+            retorna 0
+        }
+        se (sub == "estatisticas") {
+            se (args.tamanho() < 2) { falhar "Uso: lincones estatisticas <banco.lce>" }
+            var dbS: Motor.MotorProprio = Api.LinConEs.abrir(args[1])
+            var st: dicionario = dbS.estatisticas()
+            dbS.fechar()
+            var chs: texto[] = st.chaves()
+            para (var k: inteiro = 0; k < chs.tamanho(); k = k + 1) {
+                Io.IO.escreverLinha("${chs[k]}: ${st[chs[k]]}")
+            }
+            retorna 0
+        }
+        Io.IO.erroLinha("Subcomando desconhecido: '${sub}'. Execute 'lincones ajuda'.")
+        retorna 1
+    } pegue (erro) {
+        Io.IO.erroLinha("Erro: " + texto(erro))
+        retorna 1
+    }
+}

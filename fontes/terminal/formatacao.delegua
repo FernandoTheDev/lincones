@@ -1,0 +1,112 @@
+modulo terminal.formatacao
+
+importar execucao.motor_proprio como Motor
+importar tipos.valor como Val
+
+funcao repetirCaractere(ch: texto, vezes: inteiro): texto {
+    var s: texto = ""
+    var i: inteiro = 0
+    enquanto (i < vezes) {
+        s = s + ch
+        i = i + 1
+    }
+    retorna s
+}
+
+funcao preencherDireita(s: texto, largura: inteiro): texto {
+    var falta: inteiro = largura - s.tamanho()
+    se (falta <= 0) { retorna s }
+    retorna s + repetirCaractere(" ", falta)
+}
+
+funcao formatarTabela(res: Motor.ResultadoProprio): texto {
+    se (res.colunas.tamanho() == 0) {
+        se (res.mensagem != "") { retorna res.mensagem }
+        retorna "Linhas afetadas: ${res.linhasAfetadas}"
+    }
+    var larguras: inteiro[] = []
+    para (var c: inteiro = 0; c < res.colunas.tamanho(); c = c + 1) {
+        larguras.adicionar(res.colunas[c].tamanho())
+    }
+    para (var l: inteiro = 0; l < res.linhas.tamanho(); l = l + 1) {
+        var row: Val.Valor[] = res.linhas[l]
+        para (var c2: inteiro = 0; c2 < row.tamanho(); c2 = c2 + 1) {
+            var lenV: inteiro = row[c2].paraTexto().tamanho()
+            se (lenV > larguras[c2]) { larguras[c2] = lenV }
+        }
+    }
+
+    var sep: texto = "+"
+    para (var cs: inteiro = 0; cs < larguras.tamanho(); cs = cs + 1) {
+        sep = sep + repetirCaractere("-", larguras[cs] + 2) + "+"
+    }
+
+    var out: texto = sep + "\n|"
+    para (var ch: inteiro = 0; ch < res.colunas.tamanho(); ch = ch + 1) {
+        out = out + " " + preencherDireita(res.colunas[ch], larguras[ch]) + " |"
+    }
+    out = out + "\n" + sep
+
+    para (var lr: inteiro = 0; lr < res.linhas.tamanho(); lr = lr + 1) {
+        var rowR: Val.Valor[] = res.linhas[lr]
+        out = out + "\n|"
+        para (var cr: inteiro = 0; cr < rowR.tamanho(); cr = cr + 1) {
+            out = out + " " + preencherDireita(rowR[cr].paraTexto(), larguras[cr]) + " |"
+        }
+    }
+    out = out + "\n" + sep + "\n(${res.linhas.tamanho()} linha(s))"
+    retorna out
+}
+
+funcao escaparJson(s: texto): texto {
+    retorna s.substituir("\\", "\\\\").substituir("\"", "\\\"").substituir("\n", "\\n").substituir("\r", "\\r").substituir("\t", "\\t")
+}
+
+funcao formatarJson(res: Motor.ResultadoProprio): texto {
+    var out: texto = "["
+    para (var l: inteiro = 0; l < res.linhas.tamanho(); l = l + 1) {
+        se (l > 0) { out = out + "," }
+        var row: Val.Valor[] = res.linhas[l]
+        out = out + "{"
+        para (var c: inteiro = 0; c < res.colunas.tamanho(); c = c + 1) {
+            se (c > 0) { out = out + "," }
+            var v: Val.Valor = row[c]
+            out = out + "\"" + escaparJson(res.colunas[c]) + "\":"
+            se (v.ehNulo()) {
+                out = out + "null"
+            } senao se (v.tipoDado == Val.TipoDado.Inteiro ou v.tipoDado == Val.TipoDado.Real) {
+                out = out + v.paraTexto()
+            } senao se (v.tipoDado == Val.TipoDado.Logico) {
+                out = out + (v.logicoVal ? "true" : "false")
+            } senao {
+                out = out + "\"" + escaparJson(v.paraTexto()) + "\""
+            }
+        }
+        out = out + "}"
+    }
+    retorna out + "]"
+}
+
+funcao escaparCsv(s: texto): texto {
+    se (s.inclui(",") ou s.inclui("\"") ou s.inclui("\n")) {
+        retorna "\"" + s.substituir("\"", "\"\"") + "\""
+    }
+    retorna s
+}
+
+funcao formatarCsv(res: Motor.ResultadoProprio): texto {
+    var out: texto = ""
+    para (var c: inteiro = 0; c < res.colunas.tamanho(); c = c + 1) {
+        se (c > 0) { out = out + "," }
+        out = out + escaparCsv(res.colunas[c])
+    }
+    para (var l: inteiro = 0; l < res.linhas.tamanho(); l = l + 1) {
+        out = out + "\n"
+        var row: Val.Valor[] = res.linhas[l]
+        para (var cr: inteiro = 0; cr < row.tamanho(); cr = cr + 1) {
+            se (cr > 0) { out = out + "," }
+            out = out + escaparCsv(row[cr].paraTexto())
+        }
+    }
+    retorna out
+}

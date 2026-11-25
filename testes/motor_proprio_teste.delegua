@@ -1,0 +1,110 @@
+importar armazenamento.posix_io como Pio
+importar execucao.motor_proprio como Motor
+importar conectores.sqlite_conector como ConnSql
+
+funcao afirmar(condicao: logico, msg: texto): vazio {
+    se (!condicao) {
+        falhar "FALHA MOTOR PROPRIO: " + msg
+    }
+}
+
+const caminhoBanco: texto = "/tmp/lincones_motor_proprio.lce"
+const caminhoBackup: texto = "/tmp/lincones_motor_proprio_copia.lce"
+Pio.PosixIO.unlink(caminhoBanco)
+Pio.PosixIO.unlink(caminhoBanco + "-wal")
+Pio.PosixIO.unlink(caminhoBackup)
+
+var db = Motor.MotorProprio(caminhoBanco, 32, verdadeiro, falso)
+db.abrir()
+
+// 1. DDL + Restrições + Índices + Chaves Estrangeiras
+db.executar("CRIAR TABELA clientes (id INTEIRO NAO NULO CHAVE PRIMARIA AUTO INCREMENTO, nome TEXTO(100) NAO NULO, cidade TEXTO(60), idade INTEIRO);")
+db.executar("CRIAR TABELA pedidos (id INTEIRO NAO NULO CHAVE PRIMARIA AUTO INCREMENTO, cliente_id INTEIRO NAO NULO REFERENCIA clientes(id), valor INTEIRO NAO NULO);")
+db.executar("CRIAR INDICE idx_idade EM clientes (idade);")
+
+// 2. Inserções em lote e parametrizadas
+db.executar("INSERIR EM clientes (nome, cidade, idade) VALORES (\"Ana\", \"SP\", 30), (\"Bruno\", \"RJ\", 25), (\"Carla\", \"SP\", 40), (\"Diego\", NULO, 25);")
+db.executar("INSERIR EM pedidos (cliente_id, valor) VALORES (1, 100), (1, 250), (2, 80);")
+
+// Teste de integridade referencial (deve rejeitar cliente_id inexistente)
+var rejeitouFk: logico = falso
+tente {
+    db.executar("INSERIR EM pedidos (cliente_id, valor) VALORES (999, 50);")
+} pegue (err) {
+    rejeitouFk = verdadeiro
+}
+afirmar(rejeitouFk, "Chave estrangeira inválida deve ser rejeitada")
+
+// 3. Validar uso do Índice B+ Tree pelo Otimizador via EXPLICAR
+var expIdx = db.executar("EXPLICAR SELECIONAR nome DE clientes ONDE id = 2;")
+afirmar(expIdx.planoTexto.inclui("BuscaIndiceExata"), "Otimizador deve escolher BuscaIndiceExata para PK: " + expIdx.planoTexto)
+
+var expInt = db.executar("EXPLICAR SELECIONAR nome DE clientes ONDE idade ENTRE 20 E 35;")
+afirmar(expInt.planoTexto.inclui("VarreduraIndiceIntervalo"), "Otimizador deve escolher VarreduraIndiceIntervalo para ENTRE: " + expInt.planoTexto)
+
+// 4. Teste diferencial: Otimizador ON vs Otimizador OFF (mesmos resultados!)
+var rOptOn = db.executar("SELECIONAR nome FROM clientes ONDE idade >= 20 + 5 E id = 2;".substituir("FROM", "DE"))
+db.otimizador.habilitarDobramentoConstantes = falso
+db.otimizador.habilitarSelecaoIndice = falso
+var rOptOff = db.executar("SELECIONAR nome DE clientes ONDE idade >= 20 + 5 E id = 2;")
+db.otimizador.habilitarDobramentoConstantes = verdadeiro
+db.otimizador.habilitarSelecaoIndice = verdadeiro
+afirmar(rOptOn.linhas.tamanho() == 1 e rOptOff.linhas.tamanho() == 1, "Otimizador ON e OFF devem retornar 1 linha")
+afirmar(rOptOn.linhas[0][0].textoVal == rOptOff.linhas[0][0].textoVal, "Otimizador ON e OFF devem produzir o mesmo resultado")
+
+// 5. Teste diferencial contra ORÁCULO EXTERNO SQLite!
+var oraculo = ConnSql.ConectorSQLite(":memory:")
+oraculo.executarLinConEs("CRIAR TABELA clientes (id INTEIRO NAO NULO CHAVE PRIMARIA AUTO INCREMENTO, nome TEXTO(100) NAO NULO, cidade TEXTO(60), idade INTEIRO);")
+oraculo.executarLinConEs("CRIAR TABELA pedidos (id INTEIRO NAO NULO CHAVE PRIMARIA AUTO INCREMENTO, cliente_id INTEIRO NAO NULO REFERENCIA clientes(id), valor INTEIRO NAO NULO);")
+oraculo.executarLinConEs("INSERIR EM clientes (nome, cidade, idade) VALORES (\"Ana\", \"SP\", 30), (\"Bruno\", \"RJ\", 25), (\"Carla\", \"SP\", 40), (\"Diego\", NULO, 25);")
+oraculo.executarLinConEs("INSERIR EM pedidos (cliente_id, valor) VALORES (1, 100), (1, 250), (2, 80);")
+
+const qDif1: texto = "SELECIONAR c.nome, CONTAR(p.id) COMO qtd DE clientes COMO c JUNCAO ESQUERDA pedidos COMO p EM c.id = p.cliente_id AGRUPAR POR c.nome ORDENAR POR c.nome CRESCENTE;"
+var resProp1 = db.executar(qDif1)
+var resSql1 = oraculo.executarLinConEs(qDif1)
+afirmar(resProp1.linhas.tamanho() == resSql1.linhas.tamanho(), "Diferencial 1: contagem de linhas difere")
+para (var i: inteiro = 0; i < resProp1.linhas.tamanho(); i = i + 1) {
+    var nomeP: texto = resProp1.linhas[i][0].paraTexto()
+    var qtdP: inteiro = resProp1.linhas[i][1].inteiroVal
+    var nomeS: texto = texto(resSql1.linhas[i]["nome"])
+    var qtdS: inteiro = inteiro(resSql1.linhas[i]["qtd"])
+    afirmar(nomeP == nomeS e qtdP == qtdS, "Diferencial 1 divergência na linha ${i}: proprio=(${nomeP},${qtdP}) vs sqlite=(${nomeS},${qtdS})")
+}
+
+const qDif2: texto = "SELECIONAR cidade, CONTAR(*) COMO total, SOMA(idade) COMO soma_idade DE clientes ONDE cidade EH NAO NULO AGRUPAR POR cidade ORDENAR POR cidade CRESCENTE;"
+var resProp2 = db.executar(qDif2)
+var resSql2 = oraculo.executarLinConEs(qDif2)
+afirmar(resProp2.linhas.tamanho() == resSql2.linhas.tamanho(), "Diferencial 2: contagem de linhas difere")
+para (var j: inteiro = 0; j < resProp2.linhas.tamanho(); j = j + 1) {
+    afirmar(resProp2.linhas[j][0].paraTexto() == texto(resSql2.linhas[j]["cidade"]), "Diferencial 2 cidade difere")
+    afirmar(resProp2.linhas[j][1].inteiroVal == inteiro(resSql2.linhas[j]["total"]), "Diferencial 2 total difere")
+}
+oraculo.fechar()
+
+// 6. Atualização, Exclusão, Transação explícita + Savepoint, Backup e Integridade
+db.executar("INICIAR TRANSACAO; ATUALIZAR clientes DEFINIR idade = 31 ONDE nome = \"Ana\"; PONTO DE SALVAMENTO p1; EXCLUIR DE pedidos ONDE id = 3; REVERTER PARA p1; CONFIRMAR;")
+var rAna = db.executar("SELECIONAR idade DE clientes ONDE nome = ?;", ["Ana"])
+afirmar(rAna.linhas[0][0].inteiroVal == 31, "Idade de Ana deve ser 31")
+var rPed = db.executar("SELECIONAR CONTAR(*) DE pedidos;")
+afirmar(rPed.linhas[0][0].inteiroVal == 3, "Pedido 3 deve ter sido preservado pelo REVERTER PARA p1")
+
+var errosInt = db.verificarIntegridade()
+afirmar(errosInt.tamanho() == 0, "Verificador de integridade falhou: " + texto(errosInt))
+
+db.copiarPara(caminhoBackup)
+var st = db.estatisticas()
+afirmar(texto(st["backendGC"]) == "cgd-gc", "Backend GC deve ser cgd-gc")
+db.fechar()
+
+// Reabrir a cópia de backup e validar dados!
+var dbCopia = Motor.MotorProprio(caminhoBackup, 16, verdadeiro, falso)
+dbCopia.abrir()
+var rCopia = dbCopia.executar("SELECIONAR CONTAR(*) DE clientes;")
+afirmar(rCopia.linhas[0][0].inteiroVal == 4, "Backup deve conter 4 clientes")
+afirmar(dbCopia.verificarIntegridade().tamanho() == 0, "Integridade da cópia deve passar")
+dbCopia.fechar()
+
+Pio.PosixIO.unlink(caminhoBanco)
+Pio.PosixIO.unlink(caminhoBanco + "-wal")
+Pio.PosixIO.unlink(caminhoBackup)
+escreva("motor_proprio_teste: OK")

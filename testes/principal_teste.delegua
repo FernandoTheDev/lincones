@@ -1,4 +1,21 @@
-importar utilitarios.saudacao
+importar api.lincones como Api
 
-assercao(utilitarios.saudacao.cumprimentar("CGD") == "Olá, CGD!")
-escreva("OK")
+funcao afirmar(condicao: logico, msg: texto): vazio {
+    se (!condicao) {
+        falhar "FALHA API PUBLICA: " + msg
+    }
+}
+
+// 1. Tradução pela API pública
+var sqlPg: texto = Api.LinConEs.traduzir("SELECIONAR nome DE clientes ONDE idade >= ?;", "postgresql")
+afirmar(sqlPg.inclui("$1"), "API traduzir PostgreSQL falhou: " + sqlPg)
+
+// 2. Motor em memória pela API pública
+var db = Api.LinConEs.emMemoria()
+db.executar("CRIAR TABELA itens (id INTEIRO CHAVE PRIMARIA AUTO INCREMENTO, nome TEXTO(50) NAO NULO);")
+db.executar("INSERIR EM itens (nome) VALORES (\"Teclado\"), (\"Mouse\");")
+var res = db.executar("SELECIONAR * DE itens ORDENAR POR id CRESCENTE;")
+afirmar(res.linhas.tamanho() == 2 e res.linhas[0][1].textoVal == "Teclado", "API emMemoria falhou")
+db.fechar()
+
+escreva("principal_teste: OK")

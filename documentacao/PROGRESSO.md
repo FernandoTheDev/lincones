@@ -1,22 +1,19 @@
 # Progresso do Desenvolvimento — LinConEs Nativo
 
 ## Estado Atual
-- **Fase atual:** Fase 0 (Investigação) → Fase 1 (Fundação)
+- **Fase atual:** Fase 12 concluída (Entrega consolidada)
 - **Compilador:** CGD v0.10.0 (`~/cgd/cgd`, `--gc=cgd`)
-- **Diretório raiz:** `~/lincones`
+- **Suíte oficial (`cgd testar`):** 9/9 arquivos de teste aprovados
 
 ## Concluído
-- [x] Inspeção completa do ambiente e `~/cgd` (docs, stdlib, runtime, FFI, GC híbrido, projetos).
-- [x] Validação experimental de `CGD-GC`, `--relatorio-memoria`, zero `libgc`, `@pilha`, `@nativo`, `Bytes`, `SQLite`, `PosixIO` (`open`/`fdopen`/`fseeko`/`fgetc_unlocked`/`fputc_unlocked`/`fflush_unlocked`/`fdatasync`/`flock`/`ftruncate`) e `LibPQ`.
-- [x] Clone isolado das referências oficiais (`LinConEs`, `lincones-sqlite`, `lincones-mysql`, `lincones-postgresql`) e análise normativa em andamento.
-- [x] Inicialização oficial do projeto `~/lincones` via `cgd iniciar lincones` e repositório git local.
-- [x] Criação de `documentacao/INVESTIGACAO_CGD.md`.
-
-## Próximas Ações
-1. Concluir `documentacao/CONFORMIDADE_LINCONES.md` com base no estudo dos 4 repositórios oficiais.
-2. Implementar Fase 1 (Fundação: diagnósticos, tipos, catálogo, testes base) e validar `cgd testar`.
-3. Implementar Fase 2 (Frontend completo: Lexador, AST, Parser, Análise Semântica).
-4. Implementar Fase 3 (Motor Universal: Tradutores SQLite, PostgreSQL, MySQL + Conectores).
-5. Implementar Fases 4–6 (SGBD Embarcado: Formato Binário, Pager, Buffer Pool, Slotted Pages, B+ Tree, Catálogo, WAL, Transações, Concorrência).
-6. Implementar Fases 7–9 (Executor Físico, Planejador/Otimizador, API Pública, CLI, REPL).
-7. Implementar Fases 10–12 (Fuzzing, Testes Diferenciais com SQLite, Falha/Recuperação, Sanitizers, Benchmarks, Relatório Final).
+- [x] Fase 0 — Investigação completa do CGD e dos 4 repositórios oficiais LinConEs (`INVESTIGACAO_CGD.md`, `CONFORMIDADE_LINCONES.md`).
+- [x] Fase 1 — Projeto oficial CGD (`projeto.json`), diagnósticos, CRC32, sistema de tipos, lógica ternária e catálogo abstrato.
+- [x] Fase 2 — Frontend único: Lexador, AST, Parser (modo estrito + estendido) e Análise Semântica.
+- [x] Fase 3 — Motor Universal: Tradutores SQLite, PostgreSQL e MySQL + Conectores.
+- [x] Fase 4 — Armazenamento físico `.lce` (4 KiB), `PosixIO`, Buffer Pool CLOCK e Slotted Pages.
+- [x] Fase 5 — Índices B+ Tree persistentes com verificador estrutural e catálogo persistente.
+- [x] Fase 6 — Transações ACID, WAL físico com recuperação idempotente, Savepoints e Controle de Concorrência.
+- [x] Fase 7 e 8 — Avaliador de expressões, Otimizador baseado em custo e Executor Físico completo (validado diferencialmente contra SQLite).
+- [x] Fase 9 — API pública (`api.lincones`), validação em segundo projeto CGD, CLI completa e REPL.
+- [x] Fase 10 e 11 — Fuzzing, propriedades, crash-recovery, UBSan, benchmark vs SQLite, otimização orientada por evidências e caso reproduzível do CGD-GC (`reproducoes/`).
+- [x] Fase 12 — Documentação técnica, `LIMITACOES.md` e `RELATORIO_FINAL.md`.

@@ -23,6 +23,7 @@ classe AnalisadorSintatico {
     limiteAninhamento: inteiro
     profundidade: inteiro
     contadorParametros: inteiro
+    permitirComoOperador: logico
     diagnosticos: Diag.ColetorDiagnosticos
 
     construtor(
@@ -37,6 +38,7 @@ classe AnalisadorSintatico {
         isto.limiteAninhamento = limiteAninhamento
         isto.profundidade = 0
         isto.contadorParametros = 0
+        isto.permitirComoOperador = verdadeiro
         isto.diagnosticos = diagnosticos
     }
 
@@ -538,7 +540,9 @@ classe AnalisadorSintatico {
             cmd.distinto = verdadeiro
         }
 
-        // Lista de projeções
+        // Lista de projeções (COMO aqui é sempre apelido AS, não operador LIKE)
+        var antComo: logico = isto.permitirComoOperador
+        isto.permitirComoOperador = falso
         enquanto (!isto.fim()) {
             var expr: Ast.Expressao = isto.analisarExpressao()
             var apelido: texto = ""
@@ -550,6 +554,7 @@ classe AnalisadorSintatico {
                 sustar
             }
         }
+        isto.permitirComoOperador = antComo
 
         se (isto.combinar(Tok.TipoToken.De)) {
             cmd.tabela = isto.esperarIdentificador("nome da tabela")
@@ -823,7 +828,7 @@ classe AnalisadorSintatico {
             isto.esperar(Tok.TipoToken.ParenteseDir, "Esperado ')' após lista de 'EM'.")
             retorna Ast.Expressao.emLista(esq, lista, negOp, esq.intervalo)
         }
-        se (isto.combinar(Tok.TipoToken.Como)) {
+        se (isto.permitirComoOperador e isto.combinar(Tok.TipoToken.Como)) {
             var padraoExpr: Ast.Expressao = isto.analisarAdicao()
             var cmpComo = Ast.Expressao.binaria("COMO", esq, padraoExpr, esq.intervalo)
             retorna negOp ? Ast.Expressao.unaria("NAO", cmpComo, esq.intervalo) : cmpComo

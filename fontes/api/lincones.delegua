@@ -1,0 +1,54 @@
+modulo api.lincones
+
+importar execucao.motor_proprio como Motor
+importar conectores.sqlite_conector como ConnSql
+importar sintatico.parser como Par
+importar traducao.sqlite.tradutor como TradSql
+importar traducao.postgresql.tradutor como TradPg
+importar traducao.mysql.tradutor como TradMy
+
+// Fachada pública idiomática do pacote LinConEs Nativo para consumo por outros projetos CGD.
+classe LinConEs {
+    estatico abrir(caminho: texto, maxPaginasCache: inteiro = 256, duravel: logico = verdadeiro): Motor.MotorProprio {
+        var m = Motor.MotorProprio(caminho, maxPaginasCache, duravel, falso)
+        m.abrir()
+        retorna m
+    }
+
+    estatico emMemoria(): Motor.MotorProprio {
+        var m = Motor.MotorProprio(":memoria:", 256, falso, falso)
+        m.abrir()
+        retorna m
+    }
+
+    estatico conectarSQLite(caminho: texto = ":memory:"): ConnSql.ConectorSQLite {
+        retorna ConnSql.ConectorSQLite(caminho)
+    }
+
+    estatico traduzir(codigo: texto, motorDestino: texto = "postgresql", modoEstrito: logico = falso): texto {
+        var parsed = Par.AnalisadorSintatico.analisarCodigo(codigo, "", modoEstrito)
+        se (parsed.diagnosticos.temErros()) {
+            falhar parsed.diagnosticos.formatarTodos()
+        }
+        var mNorm: texto = motorDestino.minusculo()
+        var saida: texto = ""
+        para (var i: inteiro = 0; i < parsed.comandos.tamanho(); i = i + 1) {
+            var res: qualquer = nulo
+            se (mNorm == "sqlite") {
+                res = TradSql.TradutorSQLite().traduzir(parsed.comandos[i])
+            } senao se (mNorm == "mysql") {
+                res = TradMy.TradutorMySQL().traduzir(parsed.comandos[i])
+            } senao se (mNorm == "postgresql" ou mNorm == "postgres" ou mNorm == "pg") {
+                res = TradPg.TradutorPostgreSQL().traduzir(parsed.comandos[i])
+            } senao {
+                falhar "Motor de tradução desconhecido: '${motorDestino}'. Use sqlite, postgresql ou mysql."
+            }
+            se (res.temErros()) {
+                falhar res.diagnosticos.formatarTodos()
+            }
+            se (i > 0) { saida = saida + ";\n" }
+            saida = saida + res.sql
+        }
+        retorna saida
+    }
+}

@@ -1,0 +1,72 @@
+importar cgd.sistema.tempo como Tmp
+importar cgd.sistema.memoria como Mem
+importar armazenamento.posix_io como Pio
+importar execucao.motor_proprio como Motor
+importar conectores.sqlite_conector como ConnSql
+
+funcao executarBenchmark(escala: inteiro): vazio {
+    escreva("=== Benchmark Escala: ${escala} registros (modo :memoria: equivalente) ===")
+
+    // --- 1. Motor Próprio LinConEs ---
+    var db = Motor.MotorProprio(":memoria:", 512, falso, falso)
+    db.abrir()
+    db.executar("CRIAR TABELA bench (id INTEIRO CHAVE PRIMARIA, valor INTEIRO NAO NULO, categoria TEXTO(20));")
+
+    var t0: real = Tmp.Tempo.agoraMs()
+    db.executar("INICIAR TRANSACAO;")
+    para (var i: inteiro = 1; i <= escala; i = i + 1) {
+        db.executar("INSERIR EM bench (id, valor, categoria) VALORES (?, ?, ?);", [i, i * 10, "cat_" + texto(i % 10)])
+    }
+    db.executar("CONFIRMAR;")
+    var tInsProp: real = Tmp.Tempo.agoraMs() - t0
+
+    // 200 buscas por chave primária (B+ Tree)
+    var t1: real = Tmp.Tempo.agoraMs()
+    para (var b: inteiro = 1; b <= 200; b = b + 1) {
+        var alvo: inteiro = ((b * 97) % escala) + 1
+        var rB = db.executar("SELECIONAR valor DE bench ONDE id = " + texto(alvo) + ";")
+        se (rB.linhas.tamanho() != 1) { falhar "Falha na busca bench" }
+    }
+    var tPkProp: real = Tmp.Tempo.agoraMs() - t1
+
+    // Varredura + agregação
+    var t2: real = Tmp.Tempo.agoraMs()
+    var rAgg = db.executar("SELECIONAR CONTAR(*), SOMA(valor) DE bench;")
+    var tScanProp: real = Tmp.Tempo.agoraMs() - t2
+
+    var stProp: dicionario = db.estatisticas()
+    db.fechar()
+
+    // --- 2. SQLite (Referência Externa em :memory:) ---
+    var sql = ConnSql.ConectorSQLite(":memory:")
+    sql.executarLinConEs("CRIAR TABELA bench (id INTEIRO CHAVE PRIMARIA, valor INTEIRO NAO NULO, categoria TEXTO(20));")
+
+    var s0: real = Tmp.Tempo.agoraMs()
+    sql.iniciarTransacao()
+    para (var j: inteiro = 1; j <= escala; j = j + 1) {
+        sql.executarLinConEs("INSERIR EM bench (id, valor, categoria) VALORES (?, ?, ?);", [j, j * 10, "cat_" + texto(j % 10)])
+    }
+    sql.confirmar()
+    var tInsSql: real = Tmp.Tempo.agoraMs() - s0
+
+    var s1: real = Tmp.Tempo.agoraMs()
+    para (var b2: inteiro = 1; b2 <= 200; b2 = b2 + 1) {
+        var alvo2: inteiro = ((b2 * 97) % escala) + 1
+        var rB2 = sql.executarLinConEs("SELECIONAR valor DE bench ONDE id = " + texto(alvo2) + ";")
+        se (rB2.linhas.tamanho() != 1) { falhar "Falha na busca sqlite" }
+    }
+    var tPkSql: real = Tmp.Tempo.agoraMs() - s1
+
+    var s2: real = Tmp.Tempo.agoraMs()
+    sql.executarLinConEs("SELECIONAR CONTAR(*), SOMA(valor) DE bench;")
+    var tScanSql: real = Tmp.Tempo.agoraMs() - s2
+    sql.fechar()
+
+    escreva("  [Motor Próprio] Inserção: ${tInsProp} ms | 200 PK B+Tree: ${tPkProp} ms | Scan+Agg: ${tScanProp} ms | Índices usados: ${stProp["indicesSelecionados"]}")
+    escreva("  [SQLite C Ref ] Inserção: ${tInsSql} ms | 200 PK B-Tree: ${tPkSql} ms | Scan+Agg: ${tScanSql} ms")
+}
+
+executarBenchmark(1000)
+var mem = Mem.Memoria.estatisticas()
+escreva("=== Telemetria CGD-GC ===")
+escreva("backendGC=${mem["backendGC"]} ciclosGC=${mem["ciclosGC"]} heapBytes=${mem["heapBytes"]} liberadosDeterministicos=${mem["liberadosDeterministicos"]}")
